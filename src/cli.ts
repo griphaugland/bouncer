@@ -1,5 +1,7 @@
 import { ask } from "./conn";
 import type { JobView, Load, StatusSnapshot } from "./protocol";
+import { sessionId } from "./run";
+import { nextClockTime, parseDelay, pickEnv } from "./schedule";
 
 const tty = process.stdout.isTTY;
 const c = (code: string, s: string) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -204,4 +206,79 @@ export async function cancelCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
   console.log(reply.type === "ok" ? (reply.message ?? "ok") : "ok");
+}
+
+/** `bouncer schedule [--at HH:MM | --in 30m] [--when-idle] -- <cmd> [args...]` */
+export async function scheduleCommand(argv: string[]): Promise<void> {
+  const usage = "usage: bouncer schedule [--at HH:MM | --in 30m] [--when-idle] -- <command> [args...]";
+  let at: number | null = null;
+  let whenIdle = false;
+  let i = 0;
+  try {
+    for (; i < argv.length && argv[i] !== "--"; i++) {
+      const a = argv[i]!;
+      if (a === "--at") at = nextClockTime(argv[++i] ?? "", new Date());
+      else if (a === "--in") at = Date.now() + parseDelay(argv[++i] ?? "");
+      else if (a === "--when-idle") whenIdle = true;
+      else throw new Error(`unknown option ${a}`);
+    }
+  } catch (e) {
+    console.error(`bouncer: ${(e as Error).message}\n${usage}`);
+    process.exit(2);
+  }
+  const cmd = argv.slice(i + 1);
+  if (!cmd.length || (at === null && !whenIdle)) {
+    console.error(usage);
+    process.exit(2);
+  }
+  const reply = await ask({
+    op: "schedule",
+    argv: cmd,
+    cwd: process.cwd(),
+    env: pickEnv(process.env),
+    session: sessionId(),
+    at,
+    whenIdle,
+  });
+  if (!reply) notRunning();
+  if (reply.type === "error") {
+    console.error(`bouncer: ${reply.message}`);
+    process.exit(1);
+  }
+  const when = [at ? `at ${new Date(at).toLocaleString()}` : "", whenIdle ? "when the machine is idle" : ""]
+    .filter(Boolean)
+    .join(", ");
+  console.log(`${reply.type === "ok" ? reply.message : "scheduled"}: ${cmd.join(" ")}  (${when})`);
+}
+
+export async function scheduledCommand(args: string[]): Promise<void> {
+  const reply = await ask({ op: "scheduled", all: args.includes("--all") });
+  if (reply?.type !== "scheduled") notRunning();
+  if (!reply.items.length) {
+    console.log(dim("nothing scheduled"));
+    return;
+  }
+  for (const r of reply.items) {
+    const when = r.at ? new Date(r.at).toLocaleString() : "";
+    const idle = r.whenIdle ? " when idle" : "";
+    const exit = r.exitCode !== null ? ` exit ${r.exitCode}` : "";
+    console.log(
+      `  s${String(r.id).padEnd(4)} ${r.state.padEnd(9)} ${(when + idle).padEnd(28)} ${trim(r.argv.join(" "), 44).padEnd(44)}${exit}  ${dim(homeRel(r.logPath))}`,
+    );
+  }
+}
+
+export async function unscheduleCommand(args: string[]): Promise<void> {
+  const id = Number((args[0] ?? "").replace(/^s/, ""));
+  if (!Number.isInteger(id) || id <= 0) {
+    console.error("usage: bouncer unschedule <s-id>");
+    process.exit(2);
+  }
+  const reply = await ask({ op: "unschedule", id });
+  if (!reply) notRunning();
+  if (reply.type === "error") {
+    console.error(`bouncer: ${reply.message}`);
+    process.exit(1);
+  }
+  console.log(reply.type === "ok" ? reply.message : "ok");
 }

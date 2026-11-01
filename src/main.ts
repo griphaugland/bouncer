@@ -1,4 +1,13 @@
-import { cancelCommand, historyCommand, prioritizeCommand, statusCommand, watchCommand } from "./cli";
+import {
+  cancelCommand,
+  historyCommand,
+  prioritizeCommand,
+  scheduleCommand,
+  scheduledCommand,
+  statusCommand,
+  unscheduleCommand,
+  watchCommand,
+} from "./cli";
 import { runDaemon } from "./daemon";
 import { preToolHook, promptHook } from "./hooks";
 import { install, uninstall } from "./install";
@@ -12,6 +21,10 @@ const HELP = `bouncer: makes heavy builds and tests wait their turn so your mach
   bouncer prioritize <job|session>   move a session's jobs to the front (--clear to undo)
   bouncer cancel <job>               stop a queued or running job
   bouncer run [--slot s] -- <cmd>    run any command through the gate
+  bouncer schedule [--at 02:00 | --in 30m] [--when-idle] -- <cmd>
+                                     run later; output in ~/.bouncer/logs, notifies when done
+  bouncer scheduled [--all]          list scheduled jobs
+  bouncer unschedule <s-id>          drop a pending scheduled job
   bouncer install | uninstall        set up / remove daemon, shims and Claude Code hooks
   bouncer daemon                     run the daemon in the foreground
 
@@ -49,6 +62,15 @@ switch (cmd) {
     break;
   case "watch":
     await watchCommand();
+    break;
+  case "schedule":
+    await scheduleCommand(args);
+    break;
+  case "scheduled":
+    await scheduledCommand(args);
+    break;
+  case "unschedule":
+    await unscheduleCommand(args);
     break;
   case "history":
     await historyCommand(args);

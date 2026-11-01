@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
-import { basename } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, statSync, unlinkSync } from "node:fs";
+import { basename, join } from "node:path";
 import type { Socket } from "bun";
 import { Conn } from "./conn";
 import { paths } from "./paths";
@@ -10,10 +10,12 @@ import {
   type JobView,
   type Load,
   PROTOCOL_VERSION,
+  type ScheduledRecord,
   type ServerMsg,
   type StatusSnapshot,
 } from "./protocol";
 import { advise, agentSessions, type ExternalJob, externalJobs } from "./observe";
+import { isDue } from "./schedule";
 import { type Action, type Job, Scheduler } from "./scheduler";
 import { Store } from "./store";
 
@@ -311,6 +313,44 @@ export async function runDaemon(): Promise<void> {
       case "history":
         send(s, { type: "history", jobs: store.recent(Math.min(Math.max(msg.limit, 1), 500)) });
         break;
+      case "schedule": {
+        if (!msg.argv.length) {
+          send(s, { type: "error", message: "nothing to schedule" });
+          break;
+        }
+        mkdirSync(paths.jobLogs, { recursive: true });
+        const rec = store.addScheduled({
+          argv: msg.argv,
+          cwd: msg.cwd,
+          env: msg.env,
+          session: msg.session,
+          at: msg.at,
+          whenIdle: msg.whenIdle,
+          createdAt: now,
+          logPath: join(paths.jobLogs, `scheduled-${now}-${Math.random().toString(36).slice(2, 8)}.log`),
+        });
+        log(`scheduled s${rec.id} at=${rec.at ? new Date(rec.at).toISOString() : "-"} idle=${rec.whenIdle} ${short(rec.argv.join(" "))}`);
+        send(s, { type: "ok", message: `s${rec.id}` });
+        break;
+      }
+      case "scheduled": {
+        const states: ScheduledRecord["state"][] = msg.all
+          ? ["pending", "running", "done", "failed", "cancelled"]
+          : ["pending", "running"];
+        send(s, { type: "scheduled", items: store.scheduled(states).map(({ env: _env, ...rest }) => rest) });
+        break;
+      }
+      case "unschedule": {
+        const rec = store.scheduled(["pending"]).find((r) => r.id === msg.id);
+        if (!rec) {
+          send(s, { type: "error", message: `no pending scheduled job s${msg.id} (running ones: bouncer cancel <job>)` });
+          break;
+        }
+        store.setScheduledState(rec.id, "cancelled", { endedAt: now });
+        log(`scheduled s${rec.id} cancelled`);
+        send(s, { type: "ok", message: `cancelled s${rec.id}` });
+        break;
+      }
     }
   };
 
@@ -408,7 +448,55 @@ export async function runDaemon(): Promise<void> {
       oomEvents = count;
     }
 
+    launchScheduled(now);
     schedule();
+  };
+
+  // Scheduled jobs are launched as `bouncer run -- <argv>`, so they queue like everything else.
+  const launched = new Set<number>();
+  for (const rec of store.scheduled(["running"])) {
+    // A previous daemon was stopped while this ran; its outcome is unknown.
+    store.setScheduledState(rec.id, "failed", { endedAt: Date.now() });
+    log(`scheduled s${rec.id} was running when the daemon stopped; marked failed`);
+  }
+
+  const launchScheduled = (now: number) => {
+    const pending = store.scheduled(["pending"]);
+    if (!pending.length) return;
+    const idle = sched.load === "green" && !sched.active().length && !external.length;
+    for (const rec of pending.reverse()) {
+      if (launched.has(rec.id) || !isDue(rec, { now, idle })) continue;
+      launched.add(rec.id);
+      store.setScheduledState(rec.id, "running", { startedAt: now });
+      log(`scheduled s${rec.id} starting: ${short(rec.argv.join(" "))}`);
+      let proc: ReturnType<typeof Bun.spawn>;
+      let fd: number | undefined;
+      try {
+        fd = openSync(rec.logPath, "a", 0o600);
+        proc = Bun.spawn([process.execPath, "run", "--", ...rec.argv], {
+          cwd: rec.cwd,
+          env: { ...rec.env, BOUNCER_SESSION: rec.session },
+          stdin: "ignore",
+          stdout: fd,
+          stderr: fd,
+        });
+      } catch (e) {
+        if (fd !== undefined) closeSync(fd);
+        store.setScheduledState(rec.id, "failed", { endedAt: now });
+        log(`scheduled s${rec.id} failed to start: ${(e as Error).message}`);
+        continue;
+      }
+      const logFd = fd;
+      void proc.exited.then((code) => {
+        closeSync(logFd);
+        const state = code === 0 ? "done" : "failed";
+        store.setScheduledState(rec.id, state, { endedAt: Date.now(), exitCode: code });
+        log(`scheduled s${rec.id} ${state} exit=${code}`);
+        platform.notify("Bouncer", `Scheduled s${rec.id} ${code === 0 ? "finished" : `failed (exit ${code})`}: ${short(rec.argv.join(" "), 50)}`);
+      });
+      // Idle-gated jobs go one at a time: the first one makes the machine busy anyway.
+      if (rec.whenIdle) break;
+    }
   };
 
   const updateJobMemory = (now: number) => {

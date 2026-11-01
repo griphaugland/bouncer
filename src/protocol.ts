@@ -16,7 +16,34 @@ export type ClientMsg =
   | { op: "prioritize"; session?: string; job?: number; clear?: boolean }
   | { op: "cancel"; job: number }
   | { op: "status" }
-  | { op: "history"; limit: number };
+  | { op: "history"; limit: number }
+  | {
+      op: "schedule";
+      argv: string[];
+      cwd: string;
+      env: Record<string, string>;
+      session: string;
+      at: number | null;
+      whenIdle: boolean;
+    }
+  | { op: "scheduled"; all?: boolean }
+  | { op: "unschedule"; id: number };
+
+export interface ScheduledRecord {
+  id: number;
+  argv: string[];
+  cwd: string;
+  env: Record<string, string>;
+  session: string;
+  at: number | null;
+  whenIdle: boolean;
+  createdAt: number;
+  state: "pending" | "running" | "done" | "failed" | "cancelled";
+  startedAt: number | null;
+  endedAt: number | null;
+  exitCode: number | null;
+  logPath: string;
+}
 
 export interface JobView {
   id: number;
@@ -87,6 +114,7 @@ export type ServerMsg =
   | { type: "ok"; message?: string }
   | { type: "error"; message: string }
   | { type: "status"; status: StatusSnapshot }
-  | { type: "history"; jobs: JobRecord[] };
+  | { type: "history"; jobs: JobRecord[] }
+  | { type: "scheduled"; items: Omit<ScheduledRecord, "env">[] };
 
 export type Envelope<T> = T & { v: typeof PROTOCOL_VERSION };

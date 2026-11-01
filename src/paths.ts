@@ -12,6 +12,7 @@ export const paths = {
   shimDir: join(home, "bin"),
   binary: join(home, "bouncer"),
   log: join(home, "daemon.log"),
+  jobLogs: join(home, "logs"),
 };
 
 export const LAUNCHD_LABEL = "com.bouncer.daemon";

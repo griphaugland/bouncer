@@ -39,6 +39,11 @@ const TERMINAL: ReadonlySet<JobState> = new Set(["done", "reaped", "cancelled"])
 export class Scheduler {
   readonly jobs = new Map<number, Job>();
   load: Load = "green";
+  /**
+   * Slots taken by heavy builds Bouncer did not start (IDE, unshimmed sessions). They count
+   * against capacity but are never preempted or reaped: Bouncer has no lease on them.
+   */
+  external = new Map<string, number>();
   private prioritized = new Map<string, number>();
   private orderCounter = 0;
   private lastReapAt = Number.NEGATIVE_INFINITY;
@@ -163,9 +168,21 @@ export class Scheduler {
     if (this.load === "red") return "memory critical, nothing new starts";
     if (this.load === "yellow" && !high && total > 0) return "memory pressure elevated, one heavy job at a time";
     const cap = this.capacity(job.slot);
-    if ((bySlot.get(job.slot) ?? 0) >= cap) return `${job.slot} slot full (${cap}/${cap})`;
-    if (total >= this.policy.maxConcurrent) return `${total} heavy jobs running (max ${this.policy.maxConcurrent})`;
+    const outside = this.external.get(job.slot) ?? 0;
+    if ((bySlot.get(job.slot) ?? 0) + outside >= cap) {
+      return `${job.slot} slot full (${cap}/${cap}${outside ? `, ${outside} outside Bouncer` : ""})`;
+    }
+    const outsideTotal = this.externalTotal();
+    if (total + outsideTotal >= this.policy.maxConcurrent) {
+      return `${total + outsideTotal} heavy jobs running (max ${this.policy.maxConcurrent})`;
+    }
     return null;
+  }
+
+  externalTotal(): number {
+    let n = 0;
+    for (const v of this.external.values()) n += v;
+    return n;
   }
 
   /** Would a new job for `slot` from `session` start right now? Used by the Claude Code hook. */
@@ -230,7 +247,7 @@ export class Scheduler {
   }
 
   private pickVictim(job: Job, running: Job[], bySlot: Map<string, number>): Job | undefined {
-    const slotFull = (bySlot.get(job.slot) ?? 0) >= this.capacity(job.slot);
+    const slotFull = (bySlot.get(job.slot) ?? 0) + (this.external.get(job.slot) ?? 0) >= this.capacity(job.slot);
     const relevant = running.filter((r) => (slotFull ? r.slot === job.slot : true));
     // Something is already being stopped to make this room; wait for it instead of killing more.
     if (relevant.some((r) => r.stopping === "preempt")) return undefined;

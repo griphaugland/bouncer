@@ -13,6 +13,7 @@ import {
   type ServerMsg,
   type StatusSnapshot,
 } from "./protocol";
+import { advise, agentSessions, type ExternalJob, externalJobs } from "./observe";
 import { type Action, type Job, Scheduler } from "./scheduler";
 import { Store } from "./store";
 
@@ -26,6 +27,14 @@ const SAMPLE_MS = 2000;
 const PROCESS_SAMPLE_EVERY = 2; // every 2nd load sample
 const OOM_CHECK_MS = 30_000;
 const NOTIFY_COOLDOWN_MS = 5 * 60_000;
+const CWD_REFRESH_MS = 60_000;
+const IDLE_ADVICE_SEC = 60 * 60;
+/** A session burning less than this share of one core counts as idle. */
+const IDLE_CPU_SHARE = 0.01;
+const IDLE_WINDOW_SEC = 60;
+
+const isBouncerProcess = (command: string) =>
+  command.startsWith(paths.binary) || /\/(\.bouncer|dist)\/bouncer\s+(shim|run)\b/.test(command);
 
 function log(line: string): void {
   console.log(`${new Date().toISOString()} ${line}`);
@@ -72,6 +81,15 @@ export async function runDaemon(): Promise<void> {
   let lastNotify = 0;
   let dotnetIdleSince: number | null = Date.now();
   let sampleCount = 0;
+  let external: ExternalJob[] = [];
+  let sessions: StatusSnapshot["sessions"] = [];
+  let advice: string[] = [];
+  let compilerServerMb = 0;
+  // Per session pid: CPU seen at the last sample and when it was last busy.
+  const activity = new Map<number, { cpuSec: number; at: number; activeAt: number }>();
+  let cwds = new Map<number, string>();
+  let lastCwdRefresh = 0;
+  const reportedExternal = new Set<number>();
 
   const send = (s: Socket<SockData> | undefined, msg: ServerMsg) => {
     s?.write(`${JSON.stringify({ ...msg, v: PROTOCOL_VERSION })}\n`);
@@ -164,7 +182,65 @@ export async function runDaemon(): Promise<void> {
       prioritized: sched.prioritizedSessions(now),
       jetsamSinceStart: oomEvents,
       topProcesses,
+      external,
+      sessions,
+      advice,
     };
+  };
+
+  const observe = (now: number) => {
+    external = externalJobs(procs, isBouncerProcess);
+    const counts = new Map<string, number>();
+    for (const e of external) counts.set(e.slot, (counts.get(e.slot) ?? 0) + 1);
+    sched.external = counts;
+    for (const e of external) {
+      if (reportedExternal.has(e.pid)) continue;
+      reportedExternal.add(e.pid);
+      log(`outside Bouncer: pid=${e.pid} [${e.slot}] ${short(e.command, 80)}`);
+    }
+    const livePids = new Set(procs.map((p) => p.pid));
+    for (const pid of reportedExternal) if (!livePids.has(pid)) reportedExternal.delete(pid);
+
+    const found = agentSessions(procs);
+    if (now - lastCwdRefresh > CWD_REFRESH_MS) {
+      lastCwdRefresh = now;
+      try {
+        cwds = platform.cwdOf(found.map((s) => s.pid));
+      } catch {}
+    }
+    sessions = found.map((s) => {
+      // Judge activity over 60 s windows: short windows turn every timer tick into "active".
+      // A session first seen now has unknown history, so it counts as active until proven idle.
+      const prev = activity.get(s.pid) ?? { cpuSec: s.cpuSec, at: now, activeAt: now };
+      const wallSec = (now - prev.at) / 1000;
+      if (wallSec >= IDLE_WINDOW_SEC) {
+        if ((s.cpuSec - prev.cpuSec) / wallSec > IDLE_CPU_SHARE) prev.activeAt = now;
+        prev.cpuSec = s.cpuSec;
+        prev.at = now;
+      }
+      activity.set(s.pid, prev);
+      const activeAt = prev.activeAt;
+      return {
+        pid: s.pid,
+        kind: s.kind,
+        sessionId: s.sessionId,
+        cwd: cwds.get(s.pid),
+        rssMb: s.rssMb,
+        elapsedSec: s.elapsedSec,
+        idleSec: Math.round((now - activeAt) / 1000),
+      };
+    });
+    for (const pid of activity.keys()) if (!livePids.has(pid)) activity.delete(pid);
+    sessions.sort((a, b) => b.rssMb - a.rssMb);
+
+    compilerServerMb = compilerServers(procs).reduce((s, p) => s + p.rssKb, 0) / 1024;
+    advice = advise({
+      sessions,
+      external,
+      compilerServerMb,
+      freePercent: sample.freePercent,
+      idleThresholdSec: IDLE_ADVICE_SEC,
+    });
   };
 
   const handle = (s: Socket<SockData>, msg: ClientMsg & { v?: number }) => {
@@ -304,6 +380,7 @@ export async function runDaemon(): Promise<void> {
     if (sampleCount++ % PROCESS_SAMPLE_EVERY === 0) {
       try {
         procs = platform.listProcesses();
+        observe(now);
         updateJobMemory(now);
         await reapCompilerServers(now);
         topProcesses = summarize(procs);
@@ -348,7 +425,9 @@ export async function runDaemon(): Promise<void> {
       job.rssMb = mb;
       job.peakRssMb = Math.max(job.peakRssMb, mb);
     }
-    dotnetIdleSince = dotnetJobs.length ? null : (dotnetIdleSince ?? now);
+    // A dotnet build outside Bouncer is using the compiler server too; never kill it mid-build.
+    const dotnetBusy = dotnetJobs.length > 0 || external.some((e) => e.slot === "dotnet");
+    dotnetIdleSince = dotnetBusy ? null : (dotnetIdleSince ?? now);
   };
 
   const reapCompilerServers = async (now: number) => {

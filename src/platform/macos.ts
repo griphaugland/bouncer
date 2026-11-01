@@ -17,6 +17,15 @@ function parseMb(text: string, key: string): number {
   return m[2] === "G" ? n * 1024 : m[2] === "K" ? n / 1024 : n;
 }
 
+/** ps time/etime: `[[dd-]hh:]mm:ss[.cc]`. Minutes may exceed 59 in `time`. */
+export function parseDuration(s: string): number {
+  const [days, rest] = s.includes("-") ? [Number(s.split("-")[0]), s.split("-")[1]!] : [0, s];
+  const parts = rest.split(":").map(Number);
+  let sec = 0;
+  for (const p of parts) sec = sec * 60 + (Number.isFinite(p) ? p : 0);
+  return days * 86_400 + sec;
+}
+
 const DIAG_DIR = "/Library/Logs/DiagnosticReports";
 
 export const macos: Platform = {
@@ -34,11 +43,35 @@ export const macos: Platform = {
 
   listProcesses(): Proc[] {
     const procs: Proc[] = [];
-    for (const line of run(["/bin/ps", "-axo", "pid=,ppid=,rss=,command="]).split("\n")) {
-      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/);
-      if (m) procs.push({ pid: Number(m[1]), ppid: Number(m[2]), rssKb: Number(m[3]), command: m[4]! });
+    for (const line of run(["/bin/ps", "-axo", "pid=,ppid=,rss=,time=,etime=,command="]).split("\n")) {
+      const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(.*)$/);
+      if (!m) continue;
+      procs.push({
+        pid: Number(m[1]),
+        ppid: Number(m[2]),
+        rssKb: Number(m[3]),
+        cpuSec: parseDuration(m[4]!),
+        elapsedSec: parseDuration(m[5]!),
+        command: m[6]!,
+      });
     }
     return procs;
+  },
+
+  cwdOf(pids: number[]): Map<number, string> {
+    const out = new Map<number, string>();
+    if (!pids.length) return out;
+    const res = Bun.spawnSync(["/usr/sbin/lsof", "-a", "-d", "cwd", "-Fpn", "-p", pids.join(",")], {
+      env: C_ENV,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    let pid = 0;
+    for (const line of res.stdout.toString().split("\n")) {
+      if (line.startsWith("p")) pid = Number(line.slice(1));
+      else if (line.startsWith("n") && pid) out.set(pid, line.slice(1));
+    }
+    return out;
   },
 
   oomEventsSince(sinceMs: number): number {

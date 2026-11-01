@@ -11,6 +11,10 @@ export interface Proc {
   pid: number;
   ppid: number;
   rssKb: number;
+  /** Cumulative CPU time. */
+  cpuSec: number;
+  /** Wall time since the process started. */
+  elapsedSec: number;
   command: string;
 }
 
@@ -18,6 +22,8 @@ export interface Proc {
 export interface Platform {
   sampleLoad(): LoadSample;
   listProcesses(): Proc[];
+  /** Working directory per pid, for showing which project a session is in. */
+  cwdOf(pids: number[]): Map<number, string>;
   /** New out-of-memory kill reports since `sinceMs` (macOS: JetsamEvent files). */
   oomEventsSince(sinceMs: number): number;
   notify(title: string, message: string): void;

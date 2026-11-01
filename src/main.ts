@@ -1,4 +1,4 @@
-import { cancelCommand, historyCommand, prioritizeCommand, statusCommand } from "./cli";
+import { cancelCommand, historyCommand, prioritizeCommand, statusCommand, watchCommand } from "./cli";
 import { runDaemon } from "./daemon";
 import { preToolHook, promptHook } from "./hooks";
 import { install, uninstall } from "./install";
@@ -6,7 +6,8 @@ import { gatedRun, resolveReal, runCommand } from "./run";
 
 const HELP = `bouncer: makes heavy builds and tests wait their turn so your machine never runs out of memory.
 
-  bouncer status [--json|--line]     load, slots, running and queued jobs
+  bouncer status [--json|--line|--segment]  load, slots, jobs, sessions, advice
+  bouncer watch                      live status (cmux Dock pane)
   bouncer history [n]                last n finished jobs
   bouncer prioritize <job|session>   move a session's jobs to the front (--clear to undo)
   bouncer cancel <job>               stop a queued or running job
@@ -45,6 +46,9 @@ switch (cmd) {
   case "status":
   case "queue":
     await statusCommand(args);
+    break;
+  case "watch":
+    await watchCommand();
     break;
   case "history":
     await historyCommand(args);

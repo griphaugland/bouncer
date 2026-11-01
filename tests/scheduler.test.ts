@@ -142,6 +142,33 @@ describe("reaper", () => {
   });
 });
 
+describe("builds outside Bouncer", () => {
+  test("take slot capacity and are named in the wait reason", () => {
+    const s = new Scheduler(policy);
+    s.external.set("dotnet", 1);
+    const j = s.enqueue(job("dotnet"), 0);
+    expect(runIds(s.tick(1))).toEqual([]);
+    expect(j.waitReason).toBe("dotnet slot full (1/1, 1 outside Bouncer)");
+    s.external.clear();
+    expect(runIds(s.tick(2))).toEqual([j.id]);
+  });
+
+  test("count toward maxConcurrent", () => {
+    const s = new Scheduler({ ...policy, maxConcurrent: 2 });
+    s.external.set("node", 2);
+    s.enqueue(job("dotnet"), 0);
+    expect(runIds(s.tick(1))).toEqual([]);
+  });
+
+  test("are never preempted: a high job waits when only outside builds fill the slot", () => {
+    const s = new Scheduler(policy);
+    s.external.set("dotnet", 1);
+    s.prioritizeSession("b", 0);
+    s.enqueue(job("dotnet", "b"), 0);
+    expect(s.tick(1)).toEqual([]);
+  });
+});
+
 describe("probe", () => {
   test("reports whether a new job would start now", () => {
     const s = new Scheduler(policy);

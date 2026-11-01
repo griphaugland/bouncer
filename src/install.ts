@@ -130,6 +130,36 @@ function editHooks(file: string, add: boolean): void {
   writeAtomic(file, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
+// Appended verbatim to an existing statusLine command, so uninstall can strip exactly this.
+const STATUS_SUFFIX = `; printf ' '; "${paths.binary}" status --segment 2>/dev/null`;
+const STATUS_ONLY = `"${paths.binary}" status --segment 2>/dev/null`;
+
+function editStatusLine(file: string, add: boolean): void {
+  const settings = JSON.parse(readFileSync(file, "utf8"));
+  const current: string | undefined = settings.statusLine?.type === "command" ? settings.statusLine.command : undefined;
+  if (current === STATUS_ONLY) delete settings.statusLine;
+  else if (current?.endsWith(STATUS_SUFFIX)) settings.statusLine.command = current.slice(0, -STATUS_SUFFIX.length);
+  if (add) {
+    if (settings.statusLine?.type === "command") settings.statusLine.command += STATUS_SUFFIX;
+    else if (!settings.statusLine) settings.statusLine = { type: "command", command: STATUS_ONLY };
+    else return; // some other statusLine type: leave it alone
+  }
+  writeAtomic(file, `${JSON.stringify(settings, null, 2)}\n`);
+}
+
+const cmuxDock = join(homedir(), ".config", "cmux", "dock.json");
+const DOCK_ID = "bouncer";
+
+function editCmuxDock(add: boolean): boolean {
+  if (!existsSync(join(homedir(), ".config", "cmux"))) return false;
+  const config = existsSync(cmuxDock) ? JSON.parse(readFileSync(cmuxDock, "utf8")) : { controls: [] };
+  config.controls = (config.controls ?? []).filter((c: { id?: string }) => c.id !== DOCK_ID);
+  if (add) config.controls.push({ id: DOCK_ID, title: "Bouncer", command: `"${paths.binary}" watch`, height: 420 });
+  if (!add && !config.controls.length && Object.keys(config).length === 1) rmSync(cmuxDock, { force: true });
+  else writeAtomic(cmuxDock, `${JSON.stringify(config, null, 2)}\n`);
+  return true;
+}
+
 function rcFiles(): string[] {
   return [".zshrc", ".bashrc"].map((f) => join(homedir(), f)).filter((f) => existsSync(f));
 }
@@ -194,8 +224,11 @@ export function install(): void {
   for (const file of settingsFiles()) {
     backup(file);
     editHooks(file, true);
-    console.log(`✓ hooks       ${file}`);
+    editStatusLine(file, true);
+    console.log(`✓ hooks       ${file} (+ statusline segment)`);
   }
+  if (existsSync(cmuxDock)) backup(cmuxDock);
+  if (editCmuxDock(true)) console.log(`✓ cmux dock   ${cmuxDock} (seeds new windows; existing Docks: add a terminal running \`bouncer watch\`)`);
   for (const file of rcFiles()) {
     backup(file);
     editRc(file, true);
@@ -218,7 +251,13 @@ export function uninstall(args: string[]): void {
   for (const file of settingsFiles()) {
     backup(file);
     editHooks(file, false);
-    console.log(`✓ hooks removed from ${file}`);
+    editStatusLine(file, false);
+    console.log(`✓ hooks and statusline segment removed from ${file}`);
+  }
+  if (existsSync(cmuxDock)) {
+    backup(cmuxDock);
+    editCmuxDock(false);
+    console.log(`✓ cmux dock control removed`);
   }
   for (const file of rcFiles()) {
     if (!readFileSync(file, "utf8").includes(RC_START)) continue;

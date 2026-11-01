@@ -44,46 +44,118 @@ function jobLine(j: JobView): string {
   return `  ${String(j.id).padStart(4)}  ${j.slot.padEnd(7)} ${shortSession(j.session).padEnd(10)} ${trim(j.cmd, 42).padEnd(42)} ${extra}${prio}`;
 }
 
+function homeRel(path?: string): string {
+  if (!path) return "";
+  const home = process.env.HOME ?? "";
+  return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
+}
+
+/** Compact segment for a statusline: quiet when idle, loud when something waits or memory is tight. */
+export function segment(st: StatusSnapshot): string {
+  const dot = c(LOAD_COLOR[st.load], "●");
+  const parts: string[] = [];
+  if (st.running.length) parts.push(`${st.running.length} running`);
+  if (st.queued.length) parts.push(c("33", `${st.queued.length} queued`));
+  if (st.external.length) parts.push(c("33", `${st.external.length} outside`));
+  if (st.load !== "green") parts.push(c(LOAD_COLOR[st.load], `${st.freePercent}% free`));
+  return parts.length ? `${dot} bouncer ${parts.join(" · ")}` : `${dot} bouncer`;
+}
+
+export function renderStatus(st: StatusSnapshot): string[] {
+  const out: string[] = [];
+  const pressure = PRESSURE[st.pressureLevel] ?? String(st.pressureLevel);
+  out.push(
+    `${c(LOAD_COLOR[st.load], `● ${st.load.toUpperCase()}`)}  memory ${st.freePercent}% free, pressure ${pressure}, swap ${(st.swapUsedMb / 1024).toFixed(1)}/${(st.swapTotalMb / 1024).toFixed(1)} GB`,
+  );
+  out.push(
+    dim(
+      `  slots: ${st.slots.map((s) => `${s.name} ${s.used}/${s.capacity}`).join("  ")}   max ${st.maxConcurrent} at once   jetsam since start: ${st.jetsamSinceStart}`,
+    ),
+  );
+  if (st.advice.length) {
+    out.push("", bold("Advice"));
+    for (const a of st.advice) out.push(`  ${c("33", "→")} ${a}`);
+  }
+  out.push("", bold(`Running (${st.running.length})`));
+  if (!st.running.length) out.push(dim("  nothing"));
+  for (const j of st.running) out.push(jobLine(j));
+  out.push("", bold(`Queued (${st.queued.length})`));
+  if (!st.queued.length) out.push(dim("  nothing"));
+  for (const j of st.queued) out.push(jobLine(j));
+  if (st.external.length) {
+    out.push("", bold(`Outside Bouncer (${st.external.length})`) + dim("  heavy builds it did not start; they hold slots"));
+    for (const e of st.external) {
+      out.push(
+        `  ${String(e.pid).padStart(6)}  ${e.slot.padEnd(7)} ${trim(e.command.replace(/^\S*\//, ""), 52).padEnd(52)} ${String(e.rssMb).padStart(6)} MB  ${duration(e.elapsedSec * 1000)}`,
+      );
+    }
+  }
+  if (st.prioritized.length) {
+    out.push("", bold("Prioritized sessions"));
+    for (const p of st.prioritized) out.push(`  ${shortSession(p.session)}  until ${new Date(p.until).toLocaleTimeString()}`);
+  }
+  if (st.sessions.length) {
+    const total = st.sessions.reduce((s, x) => s + x.rssMb, 0);
+    const claude = st.sessions.filter((s) => s.kind === "claude").length;
+    out.push(
+      "",
+      bold(`Sessions (${claude} claude, ${st.sessions.length - claude} codex)`) + dim(`  ${(total / 1024).toFixed(1)} GB together`),
+    );
+    for (const s of st.sessions.slice(0, 8)) {
+      const idle = s.idleSec >= 300 ? c("33", `idle ${duration(s.idleSec * 1000)}`) : dim("active");
+      out.push(
+        `  ${String(s.pid).padStart(6)}  ${s.kind.padEnd(6)} ${String(s.rssMb).padStart(6)} MB  up ${duration(s.elapsedSec * 1000).padEnd(7)} ${idle.padEnd(tty ? 22 : 13)} ${dim(trim(homeRel(s.cwd), 50))}`,
+      );
+    }
+    if (st.sessions.length > 8) out.push(dim(`  … ${st.sessions.length - 8} more (bouncer status --json)`));
+  }
+  out.push("", bold("Biggest memory users"));
+  for (const p of st.topProcesses.slice(0, 6)) {
+    out.push(`  ${String(p.rssMb).padStart(6)} MB  ${String(p.count).padStart(3)}×  ${p.name}`);
+  }
+  return out;
+}
+
 export async function statusCommand(args: string[]): Promise<void> {
+  if (args.includes("--segment")) {
+    // Statusline use: never error, never slow. Print nothing if the daemon is down.
+    const reply = await ask({ op: "status" }, 500);
+    if (reply?.type === "status") process.stdout.write(segment(reply.status));
+    return;
+  }
   const st = await fetchStatus();
   if (args.includes("--json")) {
     console.log(JSON.stringify(st, null, 2));
     return;
   }
   if (args.includes("--line")) {
-    // One line for a statusline / cmux / prompt.
     const slots = st.slots.map((s) => `${s.name} ${s.used}/${s.capacity}`).join(" · ");
     const q = st.queued.length ? ` · ${st.queued.length} queued` : "";
     console.log(`${c(LOAD_COLOR[st.load], "●")} bouncer ${st.freePercent}% free · ${slots}${q}`);
     return;
   }
+  console.log(renderStatus(st).join("\n"));
+}
 
-  const pressure = PRESSURE[st.pressureLevel] ?? String(st.pressureLevel);
-  console.log(
-    `${c(LOAD_COLOR[st.load], `● ${st.load.toUpperCase()}`)}  memory ${st.freePercent}% free, pressure ${pressure}, swap ${(st.swapUsedMb / 1024).toFixed(1)}/${(st.swapTotalMb / 1024).toFixed(1)} GB`,
-  );
-  console.log(
-    dim(
-      `  slots: ${st.slots.map((s) => `${s.name} ${s.used}/${s.capacity}`).join("  ")}   max ${st.maxConcurrent} at once   jetsam since start: ${st.jetsamSinceStart}`,
-    ),
-  );
-  console.log();
-  console.log(bold(`Running (${st.running.length})`));
-  if (!st.running.length) console.log(dim("  nothing"));
-  for (const j of st.running) console.log(jobLine(j));
-  console.log();
-  console.log(bold(`Queued (${st.queued.length})`));
-  if (!st.queued.length) console.log(dim("  nothing"));
-  for (const j of st.queued) console.log(jobLine(j));
-  if (st.prioritized.length) {
-    console.log();
-    console.log(bold("Prioritized sessions"));
-    for (const p of st.prioritized) console.log(`  ${shortSession(p.session)}  until ${new Date(p.until).toLocaleTimeString()}`);
-  }
-  console.log();
-  console.log(bold("Biggest memory users"));
-  for (const p of st.topProcesses.slice(0, 6)) {
-    console.log(`  ${String(p.rssMb).padStart(6)} MB  ${String(p.count).padStart(3)}×  ${p.name}`);
+/** Live view, refreshed every second. Made for a cmux Dock pane. */
+export async function watchCommand(): Promise<void> {
+  const write = (s: string) => process.stdout.write(s);
+  write("\x1b[?25l");
+  const restore = () => {
+    write("\x1b[?25h\n");
+    process.exit(0);
+  };
+  process.on("SIGINT", restore);
+  process.on("SIGTERM", restore);
+  while (true) {
+    const reply = await ask({ op: "status" }, 1500);
+    const lines =
+      reply?.type === "status"
+        ? renderStatus(reply.status)
+        : [c("31", "● bouncer daemon not running"), dim("  start it with `bouncer install`")];
+    lines.push("", dim(`updated ${new Date().toLocaleTimeString()} · Ctrl-C to exit`));
+    write(`\x1b[H\x1b[2J${lines.join("\n")}`);
+    await Bun.sleep(1000);
   }
 }
 

@@ -48,6 +48,18 @@ export interface StatusSnapshot {
   prioritized: { session: string; until: number }[];
   jetsamSinceStart: number;
   topProcesses: { name: string; count: number; rssMb: number }[];
+  /** Heavy builds running without Bouncer's say-so; they occupy slots. */
+  external: { pid: number; slot: string; command: string; rssMb: number; elapsedSec: number }[];
+  sessions: {
+    pid: number;
+    kind: "claude" | "codex";
+    sessionId?: string;
+    cwd?: string;
+    rssMb: number;
+    elapsedSec: number;
+    idleSec: number;
+  }[];
+  advice: string[];
 }
 
 export interface JobRecord {

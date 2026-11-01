@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { descendants, isCompilerServer } from "../src/platform";
+import { descendants, isCompilerServer, type Proc } from "../src/platform";
 
 describe("isCompilerServer", () => {
   test.each([
@@ -23,11 +23,11 @@ describe("isCompilerServer", () => {
 describe("descendants", () => {
   test("walks the whole tree", () => {
     const procs = [
-      { pid: 2, ppid: 1, rssKb: 0, command: "a" },
-      { pid: 3, ppid: 2, rssKb: 0, command: "b" },
-      { pid: 4, ppid: 3, rssKb: 0, command: "c" },
-      { pid: 5, ppid: 1, rssKb: 0, command: "other" },
-    ];
+      [2, 1, "a"],
+      [3, 2, "b"],
+      [4, 3, "c"],
+      [5, 1, "other"],
+    ].map(([pid, ppid, command]) => ({ pid, ppid, rssKb: 0, cpuSec: 0, elapsedSec: 0, command }) as Proc);
     expect(descendants(procs, 2).map((p) => p.pid).sort()).toEqual([3, 4]);
   });
 });

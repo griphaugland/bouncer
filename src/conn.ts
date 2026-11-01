@@ -1,0 +1,103 @@
+import { existsSync } from "node:fs";
+import type { Socket } from "bun";
+import { paths } from "./paths";
+import { type ClientMsg, PROTOCOL_VERSION, type ServerMsg } from "./protocol";
+
+/** Race a promise against a timeout that is cleared afterwards, so it never holds the process open. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), ms)));
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Client side of the socket: JSON lines in, JSON lines out. */
+export class Conn {
+  private socket?: Socket<undefined>;
+  private buf = "";
+  private decoder = new TextDecoder();
+  private listeners: ((msg: ServerMsg) => void)[] = [];
+  private closeListeners: (() => void)[] = [];
+  closed = false;
+
+  /** Returns null when the daemon is not reachable; callers fail open. */
+  static async open(timeoutMs = 1000, socketPath = paths.socket): Promise<Conn | null> {
+    if (!existsSync(socketPath)) return null;
+    const conn = new Conn();
+    try {
+      const socket = await withTimeout(
+        Bun.connect({
+          unix: socketPath,
+          socket: {
+            data: (_s, chunk) => conn.feed(chunk),
+            close: () => conn.handleClose(),
+            error: () => conn.handleClose(),
+          },
+        }),
+        timeoutMs,
+      );
+      if (!socket) return null;
+      conn.socket = socket;
+      return conn;
+    } catch {
+      return null;
+    }
+  }
+
+  send(msg: ClientMsg): void {
+    if (this.closed || !this.socket) return;
+    this.socket.write(`${JSON.stringify({ ...msg, v: PROTOCOL_VERSION })}\n`);
+  }
+
+  onMessage(fn: (msg: ServerMsg) => void): void {
+    this.listeners.push(fn);
+  }
+
+  onClose(fn: () => void): void {
+    this.closeListeners.push(fn);
+  }
+
+  /** One-shot request: send, wait for the first reply, close. */
+  async request(msg: ClientMsg, timeoutMs = 2000): Promise<ServerMsg | null> {
+    const reply = new Promise<ServerMsg | null>((resolve) => {
+      this.onMessage(resolve);
+      this.onClose(() => resolve(null));
+    });
+    this.send(msg);
+    const res = await withTimeout(reply, timeoutMs);
+    this.close();
+    return res;
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.socket?.end();
+    this.handleClose();
+  }
+
+  private feed(chunk: Uint8Array): void {
+    this.buf += this.decoder.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, nl);
+      this.buf = this.buf.slice(nl + 1);
+      if (!line.trim()) continue;
+      try {
+        const msg = JSON.parse(line) as ServerMsg;
+        for (const fn of this.listeners) fn(msg);
+      } catch {}
+    }
+  }
+
+  private handleClose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const fn of this.closeListeners) fn();
+  }
+}
+
+/** Open, send one message, return the reply. */
+export async function ask(msg: ClientMsg, timeoutMs = 2000): Promise<ServerMsg | null> {
+  const conn = await Conn.open(Math.min(timeoutMs, 1000));
+  if (!conn) return null;
+  return conn.request(msg, timeoutMs);
+}

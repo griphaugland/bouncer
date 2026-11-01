@@ -1,0 +1,413 @@
+import { existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
+import { basename } from "node:path";
+import type { Socket } from "bun";
+import { Conn } from "./conn";
+import { paths } from "./paths";
+import { compilerServers, descendants, getPlatform, killTree, type LoadSample, type Proc } from "./platform";
+import { loadPolicy, type Policy } from "./policy";
+import {
+  type ClientMsg,
+  type JobView,
+  type Load,
+  PROTOCOL_VERSION,
+  type ServerMsg,
+  type StatusSnapshot,
+} from "./protocol";
+import { type Action, type Job, Scheduler } from "./scheduler";
+import { Store } from "./store";
+
+interface SockData {
+  buf: string;
+  decoder: TextDecoder;
+  jobId?: number;
+}
+
+const SAMPLE_MS = 2000;
+const PROCESS_SAMPLE_EVERY = 2; // every 2nd load sample
+const OOM_CHECK_MS = 30_000;
+const NOTIFY_COOLDOWN_MS = 5 * 60_000;
+
+function log(line: string): void {
+  console.log(`${new Date().toISOString()} ${line}`);
+}
+
+export function classifyLoad(sample: LoadSample, policy: Policy): Load {
+  if (sample.pressureLevel >= 4 || sample.freePercent < policy.gate.redFreePercent) return "red";
+  if (sample.pressureLevel >= 2 || sample.freePercent < policy.gate.yellowFreePercent) return "yellow";
+  return "green";
+}
+
+function short(cmd: string, n = 60): string {
+  return cmd.length > n ? `${cmd.slice(0, n - 1)}…` : cmd;
+}
+
+export async function runDaemon(): Promise<void> {
+  mkdirSync(paths.home, { recursive: true });
+
+  if (existsSync(paths.socket)) {
+    const existing = await Conn.open(500);
+    if (existing) {
+      existing.close();
+      console.error("bouncer: daemon already running");
+      process.exit(0);
+    }
+    unlinkSync(paths.socket);
+  }
+
+  const platform = getPlatform();
+  const store = new Store(paths.db);
+  let policy = loadPolicy();
+  let policyMtime = existsSync(paths.policy) ? statSync(paths.policy).mtimeMs : 0;
+  const sched = new Scheduler(policy, store.maxId() + 1);
+  const startedAt = Date.now();
+
+  const sockets = new Map<number, Socket<SockData>>();
+  const lastSent = new Map<number, string>();
+  let sample: LoadSample = platform.sampleLoad();
+  sched.load = classifyLoad(sample, policy);
+  let procs: Proc[] = [];
+  let topProcesses: StatusSnapshot["topProcesses"] = [];
+  let oomEvents = 0;
+  let lastOomCheck = 0;
+  let lastNotify = 0;
+  let dotnetIdleSince: number | null = Date.now();
+  let sampleCount = 0;
+
+  const send = (s: Socket<SockData> | undefined, msg: ServerMsg) => {
+    s?.write(`${JSON.stringify({ ...msg, v: PROTOCOL_VERSION })}\n`);
+  };
+
+  const notify = (message: string) => {
+    if (Date.now() - lastNotify < NOTIFY_COOLDOWN_MS) return;
+    lastNotify = Date.now();
+    platform.notify("Bouncer", message);
+  };
+
+  const finish = (job: Job, exitCode?: number, forced?: Job["state"]) => {
+    const done = sched.finish(job.id, Date.now(), exitCode, forced);
+    if (!done) return;
+    sockets.delete(done.id);
+    lastSent.delete(done.id);
+    store.save(done);
+    const secs = done.startedAt ? Math.round((done.endedAt! - done.startedAt) / 1000) : 0;
+    log(`job ${done.id} ${done.state} exit=${exitCode ?? "-"} ${secs}s peak=${Math.round(done.peakRssMb)}MB ${short(done.cmd)}`);
+  };
+
+  const dispatch = (actions: Action[]) => {
+    for (const a of actions) {
+      const s = sockets.get(a.job.id);
+      if (!s) {
+        finish(a.job, undefined, "cancelled");
+        continue;
+      }
+      if (a.type === "run") {
+        log(`job ${a.job.id} run [${a.job.slot}] ${a.job.priority} waited=${Math.round((Date.now() - a.job.queuedAt) / 1000)}s`);
+        send(s, { type: "run", job: a.job.id });
+      } else if (a.type === "preempt") {
+        log(`job ${a.job.id} preempted for job ${a.by.id}`);
+        send(s, { type: "preempt", job: a.job.id, by: a.by.id });
+      } else {
+        log(`job ${a.job.id} reaped: ${a.reason}`);
+        send(s, { type: "reap", job: a.job.id, reason: a.reason });
+        notify(`Memory critical. Stopped job ${a.job.id}: ${short(a.job.cmd, 40)}`);
+      }
+    }
+  };
+
+  const schedule = () => {
+    dispatch(sched.tick(Date.now()));
+    for (const job of sched.queued()) {
+      const position = sched.position(job);
+      const reason = job.waitReason ?? "waiting";
+      const key = `${position}|${reason}`;
+      if (lastSent.get(job.id) === key) continue;
+      lastSent.set(job.id, key);
+      send(sockets.get(job.id), { type: "queued", job: job.id, position, reason });
+    }
+  };
+
+  const view = (job: Job, now: number): JobView => ({
+    id: job.id,
+    slot: job.slot,
+    session: job.session,
+    cmd: job.cmd,
+    cwd: job.cwd,
+    priority: job.priority,
+    state: job.state,
+    waitReason: job.waitReason,
+    position: job.state === "queued" ? sched.position(job) : undefined,
+    elapsedMs: now - (job.state === "running" ? (job.startedAt ?? now) : job.queuedAt),
+    rssMb: Math.round(job.rssMb),
+    preemptCount: job.preemptCount,
+  });
+
+  const snapshot = (): StatusSnapshot => {
+    const now = Date.now();
+    const running = sched.running();
+    const slotNames = new Set([...Object.keys(policy.slots), ...running.map((j) => j.slot)]);
+    return {
+      pid: process.pid,
+      startedAt,
+      load: sched.load,
+      pressureLevel: sample.pressureLevel,
+      freePercent: sample.freePercent,
+      swapUsedMb: Math.round(sample.swapUsedMb),
+      swapTotalMb: Math.round(sample.swapTotalMb),
+      maxConcurrent: policy.maxConcurrent,
+      slots: [...slotNames].map((name) => ({
+        name,
+        capacity: sched.capacity(name),
+        used: running.filter((j) => j.slot === name).length,
+      })),
+      running: running.map((j) => view(j, now)),
+      queued: sched.queued().map((j) => view(j, now)),
+      prioritized: sched.prioritizedSessions(now),
+      jetsamSinceStart: oomEvents,
+      topProcesses,
+    };
+  };
+
+  const handle = (s: Socket<SockData>, msg: ClientMsg & { v?: number }) => {
+    if (msg.v !== PROTOCOL_VERSION) {
+      send(s, { type: "error", message: `unsupported protocol version ${msg.v}` });
+      return;
+    }
+    const now = Date.now();
+    switch (msg.op) {
+      case "admit": {
+        const job = sched.enqueue({ slot: msg.slot, session: msg.session, cwd: msg.cwd, cmd: msg.cmd }, now);
+        s.data.jobId = job.id;
+        sockets.set(job.id, s);
+        log(`job ${job.id} queued [${job.slot}] ${job.priority} ${short(job.cmd)}`);
+        schedule();
+        break;
+      }
+      case "started":
+        sched.markStarted(msg.job, msg.childPid);
+        break;
+      case "done": {
+        const job = sched.jobs.get(msg.job);
+        if (job) finish(job, msg.exitCode);
+        schedule();
+        break;
+      }
+      case "requeue": {
+        const job = sched.requeue(msg.job);
+        if (job) log(`job ${job.id} requeued at the front (preempted ${job.preemptCount}x)`);
+        schedule();
+        break;
+      }
+      case "probe": {
+        const results = msg.slots.map((slot) => sched.wouldRunNow(slot, msg.session, now));
+        const blocked = results.find((r) => !r.wouldRun);
+        send(s, { type: "probe", wouldRun: !blocked, reason: blocked?.reason ?? "slot free" });
+        break;
+      }
+      case "prioritize": {
+        let session = msg.session;
+        if (msg.job !== undefined) session = sched.jobs.get(msg.job)?.session;
+        if (!session) {
+          send(s, { type: "error", message: "no such job or session" });
+          break;
+        }
+        if (msg.clear) sched.clearPriority(session);
+        else sched.prioritizeSession(session, now);
+        log(`session ${session} ${msg.clear ? "priority cleared" : "prioritized"}`);
+        send(s, { type: "ok", message: msg.clear ? "priority cleared" : `prioritized for ${policy.priority.minutes} min` });
+        schedule();
+        break;
+      }
+      case "cancel": {
+        const job = sched.cancel(msg.job, now);
+        if (!job) {
+          send(s, { type: "error", message: `no active job ${msg.job}` });
+          break;
+        }
+        send(sockets.get(job.id), { type: "reap", job: job.id, reason: "cancelled from bouncer CLI" });
+        if (job.state === "queued") finish(job, 130);
+        send(s, { type: "ok", message: `cancelled job ${job.id}` });
+        schedule();
+        break;
+      }
+      case "status":
+        send(s, { type: "status", status: snapshot() });
+        break;
+      case "history":
+        send(s, { type: "history", jobs: store.recent(Math.min(Math.max(msg.limit, 1), 500)) });
+        break;
+    }
+  };
+
+  Bun.listen<SockData>({
+    unix: paths.socket,
+    socket: {
+      open(s) {
+        s.data = { buf: "", decoder: new TextDecoder() };
+      },
+      data(s, chunk) {
+        s.data.buf += s.data.decoder.decode(chunk, { stream: true });
+        let nl: number;
+        while ((nl = s.data.buf.indexOf("\n")) >= 0) {
+          const line = s.data.buf.slice(0, nl);
+          s.data.buf = s.data.buf.slice(nl + 1);
+          if (!line.trim()) continue;
+          try {
+            handle(s, JSON.parse(line));
+          } catch (e) {
+            send(s, { type: "error", message: `bad message: ${(e as Error).message}` });
+          }
+        }
+      },
+      close(s) {
+        // The connection was the lease. Its client is gone, so is its claim on a slot.
+        const id = s.data?.jobId;
+        const job = id === undefined ? undefined : sched.jobs.get(id);
+        if (job) {
+          finish(job, undefined, job.stopping === "reap" ? "reaped" : "cancelled");
+          schedule();
+        }
+      },
+      error(_s, e) {
+        log(`socket error: ${e.message}`);
+      },
+    },
+  });
+
+  const sampleLoop = async () => {
+    const now = Date.now();
+    try {
+      if (existsSync(paths.policy)) {
+        const m = statSync(paths.policy).mtimeMs;
+        if (m !== policyMtime) {
+          policyMtime = m;
+          policy = loadPolicy();
+          sched.policy = policy;
+          log("policy reloaded");
+        }
+      }
+    } catch (e) {
+      log(`policy not reloaded: ${(e as Error).message}`);
+    }
+
+    try {
+      sample = platform.sampleLoad();
+    } catch (e) {
+      log(`load sample failed: ${(e as Error).message}`);
+    }
+    const load = classifyLoad(sample, policy);
+    if (load !== sched.load) {
+      log(`load ${sched.load} -> ${load} (pressure=${sample.pressureLevel} free=${sample.freePercent}%)`);
+      if (load === "red") notify(`Memory critical (${sample.freePercent}% free). Holding all new builds.`);
+      sched.load = load;
+    }
+
+    if (sampleCount++ % PROCESS_SAMPLE_EVERY === 0) {
+      try {
+        procs = platform.listProcesses();
+        updateJobMemory(now);
+        await reapCompilerServers(now);
+        topProcesses = summarize(procs);
+      } catch (e) {
+        log(`process sample failed: ${(e as Error).message}`);
+      }
+    }
+
+    // A client that ignores a stop request gets its job tree killed from here.
+    for (const job of sched.running()) {
+      if (job.stopping && job.childPid && now - (job.stoppingSince ?? now) > policy.reaper.stopGraceSeconds * 2000) {
+        log(`job ${job.id} ignored stop request, killing pid ${job.childPid}`);
+        void killTree(platform, job.childPid, 2000);
+        job.stoppingSince = now;
+      }
+    }
+
+    if (now - lastOomCheck > OOM_CHECK_MS) {
+      lastOomCheck = now;
+      const count = platform.oomEventsSince(startedAt);
+      if (count > oomEvents) {
+        log(`macOS Jetsam event detected (${count} since start). Thresholds may be too loose.`);
+        notify("macOS killed processes for memory. Bouncer's thresholds may be too loose.");
+      }
+      oomEvents = count;
+    }
+
+    schedule();
+  };
+
+  const updateJobMemory = (now: number) => {
+    const servers = compilerServers(procs);
+    const serverRssMb = servers.reduce((sum, p) => sum + p.rssKb, 0) / 1024;
+    const dotnetJobs = sched.running().filter((j) => j.slot === "dotnet");
+    for (const job of sched.running()) {
+      if (!job.childPid) continue;
+      const tree = descendants(procs, job.childPid);
+      const self = procs.find((p) => p.pid === job.childPid);
+      let mb = (tree.reduce((sum, p) => sum + p.rssKb, 0) + (self?.rssKb ?? 0)) / 1024;
+      // Compiler servers are detached from the build that spawned them; charge them to dotnet jobs.
+      if (job.slot === "dotnet" && dotnetJobs.length) mb += serverRssMb / dotnetJobs.length;
+      job.rssMb = mb;
+      job.peakRssMb = Math.max(job.peakRssMb, mb);
+    }
+    dotnetIdleSince = dotnetJobs.length ? null : (dotnetIdleSince ?? now);
+  };
+
+  const reapCompilerServers = async (now: number) => {
+    if (dotnetIdleSince === null) return;
+    const idleFor = now - dotnetIdleSince;
+    if (idleFor < policy.reaper.compilerServerIdleSeconds * 1000 && sched.load !== "red") return;
+    for (const p of compilerServers(procs)) {
+      log(`killing idle compiler server pid=${p.pid} rss=${Math.round(p.rssKb / 1024)}MB ${short(p.command, 80)}`);
+      await killTree(platform, p.pid, 3000);
+    }
+  };
+
+  // Killing a compiler server can take seconds; never let two samples overlap.
+  let sampling = false;
+  const tickSample = async () => {
+    if (sampling) return;
+    sampling = true;
+    try {
+      await sampleLoop();
+    } finally {
+      sampling = false;
+    }
+  };
+  // Sample immediately so the first `bouncer status` already shows memory users.
+  void tickSample();
+  setInterval(() => void tickSample(), SAMPLE_MS);
+
+  const shutdown = () => {
+    log("daemon stopping");
+    try {
+      unlinkSync(paths.socket);
+    } catch {}
+    process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+
+  log(`daemon started pid=${process.pid} load=${sched.load} pressure=${sample.pressureLevel} free=${sample.freePercent}%`);
+}
+
+function appName(command: string): string {
+  if (/\/claude\/versions\/|(^|\/)claude(\s|$)/.test(command)) return "claude";
+  if (/(^|\/)codex(\s|$)|Codex\.app/.test(command)) return "codex";
+  const app = command.match(/\/([^/]+)\.app\//);
+  if (app) return app[1]!;
+  return basename(command.split(/\s+/)[0] ?? command);
+}
+
+function summarize(procs: Proc[]): StatusSnapshot["topProcesses"] {
+  const groups = new Map<string, { count: number; rssKb: number }>();
+  for (const p of procs) {
+    const name = appName(p.command);
+    const g = groups.get(name) ?? { count: 0, rssKb: 0 };
+    g.count++;
+    g.rssKb += p.rssKb;
+    groups.set(name, g);
+  }
+  return [...groups]
+    .map(([name, g]) => ({ name, count: g.count, rssMb: Math.round(g.rssKb / 1024) }))
+    .sort((a, b) => b.rssMb - a.rssMb)
+    .slice(0, 8);
+}

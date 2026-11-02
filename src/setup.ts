@@ -289,7 +289,10 @@ function finale(plan: InstallPlan, list: Agent[], ok: boolean): void {
   }
   const followUps = list.filter((a) => plan.agents.includes(a.id) && a.followUp).map((a) => a.followUp!);
   console.log(`\n${mark.ok()} ${out.bold("Bouncer is on duty.")}\n`);
-  console.log(`  1. Open a new terminal, and restart agent sessions that were already open.`);
+  // Claude Code and Codex sessions that were already open load Bouncer's hook, which routes their
+  // builds through the queue; everything else only sees the shims in a new terminal.
+  console.log(`  1. Open a new terminal for your own builds. Claude Code and Codex sessions that are already open`);
+  console.log(`     are covered; restart sessions of other agents.`);
   let n = 2;
   for (const f of followUps) console.log(`  ${n++}. ${f}`);
   console.log(`  ${n++}. ${out.bold("bouncer status")}  ${out.dim("what's running, what's waiting, and why")}`);

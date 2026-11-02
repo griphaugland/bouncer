@@ -1,7 +1,7 @@
 # Bouncer
 
 **One sentence:** A local process bouncer that watches the Mac's load, makes every heavy build, test and agent job wait its turn, and makes sure the Mac never fries.
-**Status:** v0.1 built and installed · **Owner:** Eirik · **Date:** 2026-11-02
+**Status:** v0.2 built and installed (2026-11-02) · **Owner:** Eirik · **Date:** 2026-11-02
 
 ## Problem
 
@@ -23,9 +23,17 @@ With 10 agent sessions running for a full workday:
 
 The original "swap under 8 GB" target was dropped: measured on 2026-11-02, swap sat at 9-12 GB while pressure was "normal" with 74% free. Swap is shown, never gated on.
 
-## Out of scope for v1
+## Shipped after v0.1 (same day)
 
-Menu bar app · status in cmux / Codex / Claude Code statusline (`bouncer status --line` exists for it) · scheduling ("run at 02:00") · janitor (cache cleanup) and recommendations · MCP server · Codex native hook · history charts · Linux and Windows (the `platform/` boundary exists) · signing, notarizing, Homebrew.
+- **Status everywhere:** Claude Code statusline segment, cmux Dock control (`bouncer watch`), menu bar app.
+- **Builds outside Bouncer** (IDE, sessions started before install) detected from the process table; they hold slots but are never preempted or reaped. The compiler-server reaper never fires while one runs.
+- **Sessions as load:** Claude/Codex sessions with tree memory, uptime, idle time, folder; plain-language advice.
+- **Scheduling:** `--at`, `--in`, `--when-idle`; only an env allowlist is stored.
+- **Janitor:** dry run by default; caches via their own tools; build output only in worktrees idle 14d+, only if git says ignored; worktrees and untracked folders are reported, never deleted.
+
+## Still out of scope
+
+MCP server · Codex native hook · history charts · Linux and Windows (the `platform/` boundary exists) · signing, notarizing, Homebrew.
 
 ## How it works
 

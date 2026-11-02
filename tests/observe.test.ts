@@ -96,7 +96,7 @@ describe("advise", () => {
       minFreeDiskGb: 40,
     });
     expect(out[0]).toContain("1 agent session idle for 1h+ hold 0.9 GB");
-    expect(out[1]).toContain("pid 9 is a dotnet build outside Bouncer");
+    expect(out[1]).toBe("A dotnet build Bouncer didn't start is using 1.2 GB (pid 9). Restart the session that runs it so its builds queue.");
     expect(out[2]).toContain("Only 34 GB disk free");
   });
 });

@@ -137,7 +137,7 @@ export function advise(input: AdviceInput): string[] {
   }
   for (const e of input.external) {
     out.push(
-      `pid ${e.pid} is a ${e.slot} build outside Bouncer (${Math.round(e.rssMb)} MB): ${shorten(e.command)}. Restart that session so its builds queue.`,
+      `A ${e.slot} build Bouncer didn't start is using ${mbText(e.rssMb)} (pid ${e.pid}). Restart the session that runs it so its builds queue.`,
     );
   }
   if (input.compilerServerMb > 500) {
@@ -155,9 +155,6 @@ export function advise(input: AdviceInput): string[] {
   return out;
 }
 
-function shorten(cmd: string, n = 60): string {
-  const parts = cmd.split(/\s+/);
-  const exe = basename(parts[0] ?? "");
-  const s = [exe, ...parts.slice(1)].join(" ");
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+function mbText(mb: number): string {
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 }

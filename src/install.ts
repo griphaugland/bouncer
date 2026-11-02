@@ -184,6 +184,28 @@ export function homebrewStablePath(execPath: string): string | null {
   return existsSync(stable) ? stable : null;
 }
 
+/** Homebrew's version-independent path to an installed Bouncer, if Homebrew has one. */
+export function homebrewInstall(
+  prefixes: (string | undefined)[] = [process.env.HOMEBREW_PREFIX, "/opt/homebrew", "/usr/local"],
+): string | null {
+  for (const prefix of prefixes) {
+    if (!prefix) continue;
+    const bin = `${prefix}/opt/bouncer/bin/bouncer`;
+    if (existsSync(bin)) return bin;
+  }
+  return null;
+}
+
+/**
+ * Which Homebrew binary this install should copy and follow, or null for none. Run from
+ * Homebrew: that one. Run from the installed copy (once Bouncer is set up, `bouncer` on PATH
+ * resolves to ~/.bouncer/bin/bouncer, ahead of Homebrew's) on a Mac that also has Homebrew's:
+ * adopt it, or `brew upgrade` would never reach the daemon.
+ */
+export function homebrewSource(execPath: string, installed: string, findBrew = homebrewInstall): string | null {
+  return homebrewStablePath(execPath) ?? (execPath === installed ? findBrew() : null);
+}
+
 export function step(ok: boolean, label: string, detail: string): void {
   console.log(`${ok ? mark.ok() : mark.fail()} ${label.padEnd(12)} ${out.dim(detail.replaceAll(userHome(), "~"))}`);
 }
@@ -204,7 +226,7 @@ export function performInstall(plan: InstallPlan): boolean {
   chmodSync(paths.home, 0o700);
   mkdirSync(paths.shimDir, { recursive: true });
 
-  const brew = homebrewStablePath(process.execPath);
+  const brew = homebrewSource(process.execPath, paths.binary);
   const tmpBin = `${paths.binary}.new`;
   rmSync(tmpBin, { force: true });
   if (brew) {

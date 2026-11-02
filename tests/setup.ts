@@ -10,7 +10,14 @@ import { join } from "node:path";
 const fakeHome = mkdtempSync(join(tmpdir(), "bouncer-test-home-"));
 const realHome = process.env.HOME;
 process.env.HOME = fakeHome;
-for (const v of ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "BOUNCER_HOME", "BOUNCER_BYPASS", "BOUNCER_JOB", "BOUNCER_SESSION"]) {
+for (const v of [
+  "CLAUDE_CONFIG_DIR",
+  "CODEX_HOME",
+  "BOUNCER_HOME",
+  "BOUNCER_BYPASS",
+  "BOUNCER_JOB",
+  "BOUNCER_SESSION",
+]) {
   delete process.env[v];
 }
 // A fake home has no ~/.gitconfig.
@@ -22,7 +29,11 @@ Object.assign(process.env, {
 });
 
 const { userHome, paths } = await import("../src/paths");
-if (userHome() !== fakeHome || paths.home.startsWith(realHome ?? "/nonexistent") || realHome === userInfo().homedir && userHome() === realHome) {
+if (
+  userHome() !== fakeHome ||
+  paths.home.startsWith(realHome ?? "/nonexistent") ||
+  (realHome === userInfo().homedir && userHome() === realHome)
+) {
   console.error(`tests/setup.ts: refusing to run, home did not isolate (userHome=${userHome()})`);
   process.exit(1);
 }

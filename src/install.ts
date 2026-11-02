@@ -11,30 +11,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
+import { agents } from "./agents";
 import { shimmedTools } from "./classify";
+import { backup, readJson, stripBlock, writeAtomic, writeJson } from "./files";
 import { launchdLabel, paths, userHome } from "./paths";
-import { DEFAULT_POLICY_YAML, loadPolicy } from "./policy";
+import { loadPolicy } from "./policy";
 import { mark, out } from "./term";
-import { VERSION } from "./version";
+
+// The pieces of an install. setup.ts decides what to install (wizard or --yes); this file does it.
 
 const RC_START = "# >>> bouncer >>>";
 const RC_END = "# <<< bouncer <<<";
-const HOOK_MARK = "bouncer hook";
 const plistPath = () => join(userHome(), "Library", "LaunchAgents", `${launchdLabel()}.plist`);
-
-function stamp(): string {
-  return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-}
-
-function backup(file: string): void {
-  if (existsSync(file)) copyFileSync(file, `${file}.bak-bouncer-${stamp()}`);
-}
-
-function writeAtomic(file: string, content: string): void {
-  const tmp = `${file}.tmp-bouncer`;
-  writeFileSync(tmp, content);
-  renameSync(tmp, file);
-}
 
 function shimScript(tool: string): string {
   return `#!/bin/sh
@@ -97,68 +85,25 @@ function waitForSocket(ms: number): boolean {
   return false;
 }
 
-/** Claude Code settings files to wire hooks into: the default profile plus CLAUDE_CONFIG_DIR. */
-function settingsFiles(): string[] {
-  const files = new Set([join(userHome(), ".claude", "settings.json")]);
-  if (process.env.CLAUDE_CONFIG_DIR) files.add(join(process.env.CLAUDE_CONFIG_DIR, "settings.json"));
-  return [...files].filter((f) => existsSync(f));
-}
-
-type HookGroup = { matcher?: string; hooks: { type: string; command: string; timeout?: number }[] };
-
-function withoutBouncer(groups: HookGroup[] | undefined): HookGroup[] {
-  return (groups ?? [])
-    .map((g) => ({ ...g, hooks: g.hooks.filter((h) => !h.command?.includes(HOOK_MARK)) }))
-    .filter((g) => g.hooks.length > 0);
-}
-
-function editHooks(file: string, add: boolean): void {
-  const settings = JSON.parse(readFileSync(file, "utf8"));
-  settings.hooks ??= {};
-  settings.hooks.PreToolUse = withoutBouncer(settings.hooks.PreToolUse);
-  settings.hooks.UserPromptSubmit = withoutBouncer(settings.hooks.UserPromptSubmit);
-  if (add) {
-    settings.hooks.PreToolUse.push({
-      matcher: "Bash",
-      hooks: [{ type: "command", command: `${paths.binary} hook pre-tool`, timeout: 5 }],
-    });
-    settings.hooks.UserPromptSubmit.push({
-      hooks: [{ type: "command", command: `${paths.binary} hook prompt`, timeout: 5 }],
-    });
-  }
-  for (const key of ["PreToolUse", "UserPromptSubmit"]) {
-    if (!settings.hooks[key].length) delete settings.hooks[key];
-  }
-  writeAtomic(file, `${JSON.stringify(settings, null, 2)}\n`);
-}
-
-// Appended verbatim to an existing statusLine command, so uninstall can strip exactly this.
-const STATUS_SUFFIX = `; printf ' '; "${paths.binary}" status --segment 2>/dev/null`;
-const STATUS_ONLY = `"${paths.binary}" status --segment 2>/dev/null`;
-
-function editStatusLine(file: string, add: boolean): void {
-  const settings = JSON.parse(readFileSync(file, "utf8"));
-  const current: string | undefined = settings.statusLine?.type === "command" ? settings.statusLine.command : undefined;
-  if (current === STATUS_ONLY) delete settings.statusLine;
-  else if (current?.endsWith(STATUS_SUFFIX)) settings.statusLine.command = current.slice(0, -STATUS_SUFFIX.length);
-  if (add) {
-    if (settings.statusLine?.type === "command") settings.statusLine.command += STATUS_SUFFIX;
-    else if (!settings.statusLine) settings.statusLine = { type: "command", command: STATUS_ONLY };
-    else return; // some other statusLine type: leave it alone
-  }
-  writeAtomic(file, `${JSON.stringify(settings, null, 2)}\n`);
-}
-
-const cmuxDock = join(userHome(), ".config", "cmux", "dock.json");
+const cmuxConfigDir = () => join(userHome(), ".config", "cmux");
+const cmuxDock = () => join(cmuxConfigDir(), "dock.json");
 const DOCK_ID = "bouncer";
 
+export function hasCmux(): boolean {
+  return existsSync(cmuxConfigDir()) || existsSync("/Applications/cmux.app");
+}
+
 function editCmuxDock(add: boolean): boolean {
-  if (!existsSync(join(userHome(), ".config", "cmux"))) return false;
-  const config = existsSync(cmuxDock) ? JSON.parse(readFileSync(cmuxDock, "utf8")) : { controls: [] };
-  config.controls = (config.controls ?? []).filter((c: { id?: string }) => c.id !== DOCK_ID);
-  if (add) config.controls.push({ id: DOCK_ID, title: "Bouncer", command: `"${paths.binary}" watch`, height: 420 });
-  if (!add && !config.controls.length && Object.keys(config).length === 1) rmSync(cmuxDock, { force: true });
-  else writeAtomic(cmuxDock, `${JSON.stringify(config, null, 2)}\n`);
+  // Never create cmux's config on a Mac without cmux.
+  if (add ? !hasCmux() : !existsSync(cmuxConfigDir())) return false;
+  const file = cmuxDock();
+  const config = readJson(file);
+  const controls = ((config.controls ?? []) as { id?: string }[]).filter((c) => c.id !== DOCK_ID);
+  if (add) controls.push({ id: DOCK_ID, title: "Bouncer", command: `"${paths.binary}" watch`, height: 420 } as never);
+  if (!add && !existsSync(file)) return false;
+  backup(file);
+  if (!add && !controls.length && Object.keys(config).length <= 1) rmSync(file, { force: true });
+  else writeJson(file, { ...config, controls });
   return true;
 }
 
@@ -185,20 +130,11 @@ function rcFiles(create: boolean): string[] {
   return [...files];
 }
 
-function stripBlock(text: string): string {
-  const start = text.indexOf(RC_START);
-  const end = text.indexOf(RC_END);
-  if (start < 0 || end < start) return text;
-  const before = text.slice(0, start).replace(/\n+$/, "\n");
-  const after = text.slice(end + RC_END.length).replace(/^\n/, "");
-  return `${(before + after).trimEnd()}\n`;
-}
-
 function editRc(file: string, add: boolean): void {
-  let text = stripBlock(readFileSync(file, "utf8"));
+  let text = stripBlock(readFileSync(file, "utf8"), RC_START, RC_END);
   if (add) {
     // Appended last so it lands in front of every other PATH entry the file prepends.
-    text += `\n${RC_START}\nexport PATH="${paths.shimDir}:$PATH"\n${RC_END}\n`;
+    text += `${text ? "\n" : ""}${RC_START}\nexport PATH="${paths.shimDir}:$PATH"\n${RC_END}\n`;
   }
   writeAtomic(file, text);
 }
@@ -241,21 +177,26 @@ export function homebrewStablePath(execPath: string): string | null {
   return existsSync(stable) ? stable : null;
 }
 
-function step(ok: boolean, label: string, detail: string): void {
-  console.log(`${ok ? mark.ok() : mark.fail()} ${label.padEnd(9)} ${out.dim(detail.replace(userHome(), "~"))}`);
+export function step(ok: boolean, label: string, detail: string): void {
+  console.log(`${ok ? mark.ok() : mark.fail()} ${label.padEnd(12)} ${out.dim(detail.replaceAll(userHome(), "~"))}`);
 }
 
-export function install(): void {
-  // Must run from the compiled binary: that is what gets copied into ~/.bouncer.
-  if (/(^|\/)bun$/.test(process.execPath)) {
-    console.error("bouncer install must run from the compiled binary: bun run build && ./dist/bouncer install");
-    process.exit(1);
-  }
-  console.log(out.bold(`Installing Bouncer ${VERSION}\n`));
+export interface InstallPlan {
+  /** Agent ids to connect; every other known agent is disconnected. */
+  agents: string[];
+  statusLine: boolean;
+  cmuxDock: boolean;
+  /** Policy file content to write, or null to keep the existing one. */
+  policy: string | null;
+  policyNote: string;
+}
 
+/** Do the install. Returns whether the daemon came up. */
+export function performInstall(plan: InstallPlan): boolean {
   mkdirSync(paths.home, { recursive: true, mode: 0o700 });
   chmodSync(paths.home, 0o700);
   mkdirSync(paths.shimDir, { recursive: true });
+
   const brew = homebrewStablePath(process.execPath);
   const tmpBin = `${paths.binary}.new`;
   rmSync(tmpBin, { force: true });
@@ -265,20 +206,21 @@ export function install(): void {
     symlinkSync(brew, tmpBin);
     renameSync(tmpBin, paths.binary);
     step(true, "binary", `${paths.binary} → ${brew} (Homebrew)`);
-  } else {
+  } else if (process.execPath !== paths.binary) {
     copyFileSync(process.execPath, tmpBin);
     chmodSync(tmpBin, 0o755);
     renameSync(tmpBin, paths.binary);
     step(true, "binary", paths.binary);
+  } else step(true, "binary", `${paths.binary} (already in place)`);
+
+  if (plan.policy !== null) {
+    if (existsSync(paths.policy)) backup(paths.policy);
+    writeFileSync(paths.policy, plan.policy, { mode: 0o600 });
+    chmodSync(paths.policy, 0o600);
   }
+  step(true, "policy", plan.policyNote);
 
-  if (!existsSync(paths.policy)) {
-    writeFileSync(paths.policy, DEFAULT_POLICY_YAML, { mode: 0o600 });
-    step(true, "policy", `${paths.policy} (defaults)`);
-  } else step(true, "policy", `${paths.policy} (kept yours)`);
-
-  const tools = writeShims();
-  step(true, "shims", tools.join(" "));
+  step(true, "shims", writeShims().join(" "));
 
   const pathEnv = (process.env.PATH ?? "/usr/bin:/bin")
     .split(":")
@@ -296,14 +238,21 @@ export function install(): void {
     daemonUp ? `running (launchd ${launchdLabel()})` : `did not start (launchctl exited ${code}), see ${paths.log}`,
   );
 
-  for (const file of settingsFiles()) {
-    backup(file);
-    editHooks(file, true);
-    editStatusLine(file, true);
-    step(true, "claude", `hooks + statusline in ${file}`);
+  for (const agent of agents({ statusLine: plan.statusLine })) {
+    if (plan.agents.includes(agent.id)) {
+      const changed = agent.connect();
+      step(true, agent.name, changed.length ? changed.join(", ") : "connected (builds queued by shims)");
+    } else if (agent.connected() && agent.level !== "shims") {
+      // Unchecked in the wizard: take back what an earlier install added.
+      for (const file of agent.disconnect()) step(true, agent.name, `disconnected (${file})`);
+    }
   }
-  if (existsSync(cmuxDock)) backup(cmuxDock);
-  if (editCmuxDock(true)) step(true, "cmux", `Dock control in ${cmuxDock}`);
+
+  if (plan.cmuxDock && editCmuxDock(true)) step(true, "cmux", `Dock control in ${cmuxDock()}`);
+  if (!plan.cmuxDock && existsSync(cmuxDock()) && JSON.stringify(readJson(cmuxDock())).includes(`"${DOCK_ID}"`)) {
+    editCmuxDock(false);
+  }
+
   const rcs = rcFiles(true);
   for (const file of rcs) {
     backup(file);
@@ -313,15 +262,7 @@ export function install(): void {
   if (!rcs.length) {
     step(false, "PATH", `no zsh/bash startup file for ${process.env.SHELL}; add ${paths.shimDir} to PATH yourself`);
   }
-
-  console.log(`
-${out.bold("Next")}
-  1. Open a new terminal and restart your agent sessions (open ones keep their old PATH).
-  2. ${out.bold("bouncer doctor")}   checks everything is wired up
-  3. ${out.bold("bouncer status")}   what's running, what's waiting, and why
-${out.dim(`
-Skip the queue once: BOUNCER_BYPASS=1 <cmd>   Remove everything: bouncer uninstall`)}`);
-  if (!daemonUp) process.exit(1);
+  return daemonUp;
 }
 
 export function uninstall(args: string[]): void {
@@ -329,17 +270,11 @@ export function uninstall(args: string[]): void {
   bootoutAndWait(`gui/${process.getuid?.() ?? 501}`);
   rmSync(plistPath(), { force: true });
   step(true, "daemon", "stopped and removed from launchd");
-  for (const file of settingsFiles()) {
-    backup(file);
-    editHooks(file, false);
-    editStatusLine(file, false);
-    step(true, "claude", `hooks + statusline removed from ${file}`);
+  // Every known agent, not just the saved choices: nothing may be left behind.
+  for (const agent of agents()) {
+    for (const file of agent.disconnect()) step(true, agent.name, `disconnected (${file})`);
   }
-  if (existsSync(cmuxDock)) {
-    backup(cmuxDock);
-    editCmuxDock(false);
-    step(true, "cmux", "Dock control removed");
-  }
+  if (editCmuxDock(false)) step(true, "cmux", "Dock control removed");
   for (const file of rcFiles(false)) {
     if (!readFileSync(file, "utf8").includes(RC_START)) continue;
     backup(file);
@@ -354,7 +289,7 @@ export function uninstall(args: string[]): void {
   } else {
     console.log(
       out.dim(
-        `\nHistory and policy kept in ${paths.home.replace(userHome(), "~")}. Remove with: bouncer uninstall --purge`,
+        `\nHistory, policy and setup kept in ${paths.home.replace(userHome(), "~")}. Remove with: bouncer uninstall --purge`,
       ),
     );
   }

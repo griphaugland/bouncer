@@ -10,10 +10,11 @@ import {
 } from "./cli";
 import { runDaemon } from "./daemon";
 import { doctorCommand } from "./doctor";
-import { preToolHook, promptHook } from "./hooks";
-import { install, uninstall, writeShims } from "./install";
+import { hookAgent, preToolHook, promptHook } from "./hooks";
+import { uninstall, writeShims } from "./install";
 import { cleanCommand } from "./janitor";
 import { gatedRun, resolveReal, runCommand } from "./run";
+import { runSetup, tuneCommand } from "./setup";
 import { VERSION } from "./version";
 
 const HELP = `bouncer ${VERSION}: makes heavy builds and tests wait their turn so your machine never runs out of memory.
@@ -29,7 +30,10 @@ const HELP = `bouncer ${VERSION}: makes heavy builds and tests wait their turn s
   bouncer scheduled [--all]          list scheduled jobs
   bouncer unschedule <s-id>          drop a pending scheduled job
   bouncer clean [--apply <id…>|all]  find disk space; dry run unless --apply
-  bouncer install | uninstall        set up / remove daemon, shims and Claude Code hooks
+  bouncer install [--yes]            guided setup: scans this Mac, connects your agents, tunes limits
+  bouncer setup                      run the setup again (change agents, sessions, extras)
+  bouncer tune [--apply]             re-scan this Mac and compare with your policy
+  bouncer uninstall [--purge]        remove everything Bouncer added
   bouncer doctor                     check the install, PATH, hooks and daemon; prints fixes
   bouncer shims                      regenerate shims after editing tools: in policy.yaml
   bouncer daemon                     run the daemon in the foreground
@@ -58,7 +62,7 @@ switch (cmd) {
   case "hook":
     // Hooks must never break the agent: any crash is swallowed and exits 0.
     try {
-      if (args[0] === "pre-tool") await preToolHook();
+      if (args[0] === "pre-tool") await preToolHook(hookAgent(args));
       else if (args[0] === "prompt") await promptHook();
     } catch {}
     process.exit(0);
@@ -98,7 +102,11 @@ switch (cmd) {
     console.log(`shims: ${writeShims().join(", ")}`);
     break;
   case "install":
-    install();
+  case "setup":
+    await runSetup({ yes: args.includes("--yes") || args.includes("-y") });
+    break;
+  case "tune":
+    await tuneCommand(args);
     break;
   case "uninstall":
     uninstall(args);

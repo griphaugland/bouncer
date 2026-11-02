@@ -339,13 +339,18 @@ export async function runDaemon(): Promise<void> {
       case "prioritize": {
         let session = msg.session;
         if (msg.job !== undefined) session = sched.jobs.get(msg.job)?.session;
-        if (!session) {
+        if (!session && !msg.cwd) {
           send(s, { type: "error", message: "no such job or session" });
           break;
         }
-        if (msg.clear) sched.clearPriority(session);
-        else sched.prioritizeSession(session, now);
-        log(`session ${session} ${msg.clear ? "priority cleared" : "prioritized"}`);
+        if (msg.clear) sched.clearPriority(session ?? "", msg.cwd);
+        else {
+          if (session) sched.prioritizeSession(session, now);
+          if (msg.cwd) sched.prioritizeCwd(msg.cwd, now);
+        }
+        log(
+          `${[session && `session ${session}`, msg.cwd && `folder ${msg.cwd}`].filter(Boolean).join(" + ")} ${msg.clear ? "priority cleared" : "prioritized"}`,
+        );
         send(s, {
           type: "ok",
           message: msg.clear ? "priority cleared" : `prioritized for ${policy.priority.minutes} min`,

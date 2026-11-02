@@ -13,7 +13,7 @@ export type ClientMsg =
   | { op: "done"; job: number; exitCode: number }
   | { op: "requeue"; job: number }
   | { op: "probe"; slots: string[]; session: string }
-  | { op: "prioritize"; session?: string; job?: number; clear?: boolean }
+  | { op: "prioritize"; session?: string; job?: number; cwd?: string; clear?: boolean }
   | { op: "cancel"; job: number }
   | { op: "status" }
   | { op: "history"; limit: number }

@@ -50,7 +50,7 @@ check "~/.bouncer is private (700)" "[ \"\$(stat -f %Lp $HOME/.bouncer)\" = 700 
 check "launchd job uses an isolated label ($LABEL)" "[ \"$LABEL\" != com.bouncer.daemon ] && launchctl print gui/$(id -u)/$LABEL"
 check "socket is private (600)" "[ \"\$(stat -f %Lp $HOME/.bouncer/bouncer.sock)\" = 600 ]"
 check "~/$RC created with the PATH line" "grep -q '.bouncer/bin' $HOME/$RC"
-check "Claude Code hooks written" "grep -q 'bouncer hook pre-tool' $HOME/.claude/settings.json && grep -q 'bouncer hook prompt' $HOME/.claude/settings.json"
+check "Claude Code hooks written" "grep -q 'hook pre-tool' $HOME/.claude/settings.json && grep -q 'hook prompt' $HOME/.claude/settings.json"
 check "statusline segment written" "grep -q 'status --segment' $HOME/.claude/settings.json"
 check "a new login shell finds the shims first" "[ \"\$($LOGIN 'command -v dotnet' 2>/dev/null)\" = $HOME/.bouncer/bin/dotnet ]"
 check "bouncer itself is on PATH" "$LOGIN 'bouncer --version'"

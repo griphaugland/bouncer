@@ -62,7 +62,14 @@ export function humanOnlyReason(command: string): string | null {
  * If a heavy command would have to wait, move it to the background so the queue wait can't
  * hit the Bash tool's 2-10 minute timeout. The shim on PATH does the actual gating.
  */
-export async function preToolHook(): Promise<void> {
+export type HookAgent = "claude" | "codex";
+
+export function hookAgent(args: string[]): HookAgent {
+  const i = args.indexOf("--agent");
+  return args[i + 1] === "codex" ? "codex" : "claude";
+}
+
+export async function preToolHook(agent: HookAgent = "claude"): Promise<void> {
   const input = await readStdin();
   if (input?.tool_name !== "Bash") return;
   const toolInput = input.tool_input ?? {};
@@ -79,7 +86,9 @@ export async function preToolHook(): Promise<void> {
     });
     return;
   }
-  if (toolInput.run_in_background) return;
+  // Codex has no background runs: its queued builds simply wait in the foreground (the shim
+  // handles that). Only the guard above applies.
+  if (agent !== "claude" || toolInput.run_in_background) return;
 
   // Sessions started before `bouncer install` don't have the shims on PATH; nothing would gate.
   if (!(process.env.PATH ?? "").split(":").includes(paths.shimDir)) return;
@@ -118,13 +127,15 @@ export async function promptHook(): Promise<void> {
   const input = await readStdin();
   const prompt: string = input?.prompt ?? "";
   const session: string | undefined = input?.session_id;
-  if (!session || !PRIORITIZE.test(prompt)) return;
-  const reply = await ask({ op: "prioritize", session }, 1500);
+  const cwd: string | undefined = input?.cwd;
+  if ((!session && !cwd) || !PRIORITIZE.test(prompt)) return;
+  // Session for agents whose builds carry the same id (Claude Code); folder for the rest (Codex).
+  const reply = await ask({ op: "prioritize", session, cwd }, 1500);
   if (reply?.type !== "ok") return;
   emit({
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
-      additionalContext: `Bouncer: this session's builds and tests now run first (${reply.message}). Other sessions' jobs may be paused and rerun to make room.`,
+      additionalContext: `Bouncer: builds from this session and project now run first (${reply.message}). Other jobs may be paused and rerun to make room.`,
     },
   });
 }

@@ -2,21 +2,24 @@
 # Install Bouncer from a GitHub release.
 #
 #   curl -fsSL https://github.com/griphaugland/bouncer/releases/latest/download/install.sh | sh
-#   sh install.sh --version 0.3.0 --no-app
+#   sh install.sh --version 0.5.0 --no-app --yes
 #
 # Downloads the binary for this Mac, verifies its SHA-256 against the release's SHA256SUMS,
-# then runs `bouncer install` (daemon, shims, Claude Code hooks, PATH). Re-run to upgrade.
+# then runs the `bouncer install` wizard (scans this Mac, connects your agents, tunes limits).
+# Re-run to upgrade. --yes skips the questions and uses detected defaults.
 # Private repo: works when the GitHub CLI (`gh`) is installed and logged in.
 set -eu
 
 REPO="griphaugland/bouncer"
 VERSION="${BOUNCER_VERSION:-latest}"
 WITH_APP=1
+YES=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --no-app) WITH_APP=0; shift ;;
+    --yes|-y) YES=1; shift ;;
     -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     *) echo "install.sh: unknown option $1" >&2; exit 2 ;;
   esac
@@ -26,6 +29,8 @@ say() { printf '\033[1m%s\033[0m\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 [ "$(uname -s)" = "Darwin" ] || die "Bouncer supports macOS only for now."
+MACOS="$(sw_vers -productVersion)"
+[ "${MACOS%%.*}" -ge 13 ] || die "Bouncer needs macOS 13 or later; this Mac runs $MACOS."
 case "$(uname -m)" in
   arm64) ARCH=arm64 ;;
   x86_64) ARCH=x64 ;;
@@ -67,8 +72,13 @@ tar -C "$TMP" -xzf "$TMP/$ASSET"
 BIN="$(find "$TMP" -type f -name bouncer -perm -u+x | head -1)"
 [ -n "$BIN" ] || die "archive did not contain the bouncer binary"
 
-say "Installing…"
-"$BIN" install
+# A person at a terminal gets the setup wizard. Under `curl | sh` stdin is the pipe, so the
+# wizard reads the keyboard from /dev/tty. Scripts and CI (no terminal, or --yes) skip it.
+if [ "$YES" = 0 ] && [ -t 1 ] && (exec </dev/tty) 2>/dev/null; then
+  "$BIN" install </dev/tty
+else
+  "$BIN" install --yes
+fi
 
 if [ "$WITH_APP" = 1 ]; then
   APPZIP="$(grep -o 'Bouncer-[^ ]*\.app\.zip' "$TMP/SHA256SUMS" | head -1)"
@@ -84,4 +94,3 @@ if [ "$WITH_APP" = 1 ]; then
   fi
 fi
 
-say "Done. Open a new terminal, then run: bouncer doctor"

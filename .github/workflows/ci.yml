@@ -31,7 +31,9 @@ jobs:
       - name: Test (unit + daemon integration + compiled binary)
         run: bun test
       - name: Shell scripts parse
-        run: sh -n scripts/install.sh && sh -n scripts/package.sh && sh -n menubar/build.sh
+        run: for f in scripts/*.sh menubar/build.sh; do sh -n "$f"; done
+      - name: Setup wizard, driven through a pseudo-terminal
+        run: scripts/e2e-wizard.sh
       - name: Build menu bar app
         run: menubar/build.sh --out "$RUNNER_TEMP"
 

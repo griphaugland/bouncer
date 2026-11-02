@@ -1,7 +1,10 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { agents } from "./agents";
 import { shimmedTools } from "./classify";
 import { ask } from "./conn";
+import { readJson } from "./files";
+import { describe, recommend, scanMachine } from "./machine";
 import { launchdLabel, paths, userHome } from "./paths";
 import { loadPolicy } from "./policy";
 import { mark, out } from "./term";
@@ -138,25 +141,40 @@ export async function doctorCommand(): Promise<void> {
     if (missing.length) add("ok", `not installed here (nothing to gate): ${missing.join(", ")}`);
   }
 
-  // Claude Code hooks
-  const settingsFiles = [join(userHome(), ".claude", "settings.json")];
-  if (process.env.CLAUDE_CONFIG_DIR) settingsFiles.push(join(process.env.CLAUDE_CONFIG_DIR, "settings.json"));
-  const seen = new Set<string>();
-  for (const file of settingsFiles) {
-    if (seen.has(file) || !existsSync(file)) continue;
-    seen.add(file);
+  // Agents: each one chosen in setup must still be connected (an agent update or a hand edit can
+  // drop hooks). Without a setup.json (pre-0.5 install), check whatever is installed.
+  let chosen: string[] | null = null;
+  try {
+    chosen = (readJson(join(paths.home, "setup.json")).agents as string[] | undefined) ?? null;
+  } catch {}
+  for (const agent of agents()) {
+    if (agent.level === "shims" || !agent.detect()) continue;
+    const wanted = chosen ? chosen.includes(agent.id) : agent.id === "claude";
+    if (!wanted) continue;
     try {
-      const text = readFileSync(file, "utf8");
-      const settings = JSON.parse(text);
-      const hasPre = JSON.stringify(settings.hooks?.PreToolUse ?? []).includes("bouncer hook pre-tool");
-      const hasPrompt = JSON.stringify(settings.hooks?.UserPromptSubmit ?? []).includes("bouncer hook prompt");
-      if (hasPre && hasPrompt) add("ok", `Claude Code hooks in ${file.replace(userHome(), "~")}`);
-      else add("warn", `Claude Code hooks missing in ${file.replace(userHome(), "~")}`, "run `bouncer install`");
-    } catch {
-      add("warn", `could not parse ${file}`);
+      if (agent.connected()) {
+        add("ok", `${agent.name} connected`);
+        if (agent.followUp) add("ok", out.dim(agent.followUp));
+      } else add("warn", `${agent.name} was chosen in setup but isn't connected`, "run `bouncer setup`");
+    } catch (e) {
+      add("warn", `could not read ${agent.name}'s config: ${(e as Error).message}`);
     }
   }
-  if (!seen.size) add("ok", "no Claude Code settings found (hooks skipped; shims still gate builds)");
+
+  // Policy vs this machine
+  try {
+    const machine = scanMachine();
+    const sessions = (readJson(join(paths.home, "setup.json")).sessions as number | undefined) ?? 6;
+    const tuned = recommend(machine, sessions);
+    const policy = loadPolicy();
+    if (policy.maxConcurrent > tuned.maxConcurrent + 1) {
+      add(
+        "warn",
+        `policy allows ${policy.maxConcurrent} heavy jobs at once; this Mac (${machine.memoryGb} GB) is tuned for ${tuned.maxConcurrent}`,
+        "`bouncer tune` to compare, `bouncer tune --apply` to adopt",
+      );
+    } else add("ok", `limits fit this Mac (${describe(machine)})`);
+  } catch {}
 
   // Machine
   if (reply?.type === "status") {

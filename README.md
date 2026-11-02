@@ -74,7 +74,7 @@ Run it again any time with `bouncer setup`. Scripts and CI: `bouncer install --y
 detected choices, never rewrites an existing policy). Upgrades (`brew upgrade`, or re-running the
 script) apply on their own: the daemon restarts onto the new version as soon as no build is running.
 
-The menu bar app: `brew install --cask griphaugland/tap/bouncer` (the install script includes it;
+The menu bar app: `brew install --cask griphaugland/tap/bouncer-app` (the install script includes it;
 skip with `--no-app`). From source: `bun install && bun run install-local` (Bun 1.3+). Requires
 macOS 13 or later (the menu bar app, 14).
 

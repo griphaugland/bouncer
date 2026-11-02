@@ -14,3 +14,22 @@ describe("policy tools", () => {
     expect(() => parsePolicy({ tools: { "rm -rf": { slot: "x", heavy: [] } } })).toThrow(/not a valid command name/);
   });
 });
+
+import { DEFAULT_POLICY, renderPolicy } from "../src/policy";
+
+describe("renderPolicy", () => {
+  test("round-trips: what it writes parses back to the same policy", () => {
+    const custom = parsePolicy({
+      maxConcurrent: 4,
+      slots: { dotnet: 2, node: 3, e2e: 1 },
+      tools: { bazel: { slot: "jvm", heavy: ["build", "test"] }, docker: false },
+      notifications: false,
+    });
+    const reparsed = parsePolicy(Bun.YAML.parse(renderPolicy(custom, ["Tuned for: test Mac"])));
+    expect(reparsed).toEqual(custom);
+  });
+
+  test("defaults round-trip too", () => {
+    expect(parsePolicy(Bun.YAML.parse(renderPolicy(DEFAULT_POLICY)))).toEqual(DEFAULT_POLICY);
+  });
+});

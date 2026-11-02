@@ -1,10 +1,14 @@
-import { classifyCommandString } from "./classify";
+import { basename } from "node:path";
+import { classifyCommandString, commandSegments, type Segment } from "./classify";
 import { ask } from "./conn";
 import { paths } from "./paths";
 import { safeTools } from "./run";
 
-// The verb only ("prioritize this"), not the noun ("what's the priority here"). Norwegian too.
-const PRIORITIZE = /\b(prioriti[sz]e|prioriter)\b/i;
+// "prioritize this / it / that / these …" (and Norwegian "prioriter dette / det"): an
+// instruction about the current work. A bare verb matched far too much: "prioritize
+// readability", or a pasted review that mentions the word (review #8, and it happened live).
+export const PRIORITIZE =
+  /\b(?:prioriti[sz]e|prioriter)\s+(?:this|it|that|these|this one|this build|this task|my build|my tests?|dette|det|denne)\b/i;
 
 async function readStdin(): Promise<any> {
   try {
@@ -22,18 +26,38 @@ function emit(output: unknown): void {
  * Commands only the human may run. An agent that bypasses the gate or reorders the queue for
  * itself defeats the point, and agents do reach for whatever makes their own task finish first.
  */
-const HUMAN_ONLY = [
-  { re: /\bBOUNCER_BYPASS=/, what: "skipping the Bouncer queue (BOUNCER_BYPASS)" },
-  { re: /\bbouncer\s+(prioritize|cancel|unschedule|uninstall)\b/, what: "changing Bouncer's queue or install" },
-  { re: /\bbouncer\s+clean\b[^\n;&|]*--apply/, what: "deleting files with bouncer clean --apply" },
-  { re: /\blaunchctl\s+(bootout|unload|kill|disable)\b[^\n]*com\.bouncer/, what: "stopping the Bouncer daemon" },
-];
+// Only actual invocations count (first word of a shell segment, heredoc bodies stripped), so an
+// agent can still write docs or code that merely mention these commands.
+function humanOnly({ env, argv }: Segment): string | null {
+  // Any BOUNCER_* variable: BYPASS and JOB skip the gate, SESSION borrows another session's
+  // priority, HOME points the shim at a socket that doesn't exist (review finding #4).
+  const ours = (s: string) => /^BOUNCER_[A-Z_]+=/.test(s);
+  const exported = ["export", "declare", "typeset"].includes(argv[0] ?? "") ? argv.slice(1) : [];
+  const hit = [...env, ...exported].find(ours);
+  if (hit) return `setting ${hit.split("=")[0]} (it changes how Bouncer queues builds)`;
+  const [cmd = "", sub = ""] = argv;
+  if (basename(cmd) === "bouncer") {
+    if (["prioritize", "cancel", "unschedule", "uninstall"].includes(sub)) return "changing Bouncer's queue or install";
+    if (sub === "clean" && argv.includes("--apply")) return "deleting files with bouncer clean --apply";
+  }
+  if (
+    basename(cmd) === "launchctl" &&
+    ["bootout", "unload", "kill", "disable", "remove"].includes(sub) &&
+    argv.some((a) => a.includes("com.bouncer"))
+  ) {
+    return "stopping the Bouncer daemon";
+  }
+  return null;
+}
 
 export function humanOnlyReason(command: string): string | null {
-  const hit = HUMAN_ONLY.find((h) => h.re.test(command));
-  return hit
-    ? `Bouncer: ${hit.what} is reserved for the user. Ask them to do it (or to say "prioritize this" if this work is urgent), or run the command normally and let it wait its turn.`
-    : null;
+  for (const segment of commandSegments(command)) {
+    const what = humanOnly(segment);
+    if (what) {
+      return `Bouncer: ${what} is reserved for the user. Ask them to do it (or to say "prioritize this" if this work is urgent), or run the command normally and let it wait its turn.`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -43,7 +67,14 @@ export function humanOnlyReason(command: string): string | null {
  * If a heavy command would have to wait, move it to the background so the queue wait can't
  * hit the Bash tool's 2-10 minute timeout. The shim on PATH does the actual gating.
  */
-export async function preToolHook(): Promise<void> {
+export type HookAgent = "claude" | "codex";
+
+export function hookAgent(args: string[]): HookAgent {
+  const i = args.indexOf("--agent");
+  return args[i + 1] === "codex" ? "codex" : "claude";
+}
+
+export async function preToolHook(agent: HookAgent = "claude"): Promise<void> {
   const input = await readStdin();
   if (input?.tool_name !== "Bash") return;
   const toolInput = input.tool_input ?? {};
@@ -60,7 +91,9 @@ export async function preToolHook(): Promise<void> {
     });
     return;
   }
-  if (toolInput.run_in_background) return;
+  // Codex has no background runs: its queued builds simply wait in the foreground (the shim
+  // handles that). Only the guard above applies.
+  if (agent !== "claude" || toolInput.run_in_background) return;
 
   // Sessions started before `bouncer install` don't have the shims on PATH; nothing would gate.
   if (!(process.env.PATH ?? "").split(":").includes(paths.shimDir)) return;
@@ -99,13 +132,15 @@ export async function promptHook(): Promise<void> {
   const input = await readStdin();
   const prompt: string = input?.prompt ?? "";
   const session: string | undefined = input?.session_id;
-  if (!session || !PRIORITIZE.test(prompt)) return;
-  const reply = await ask({ op: "prioritize", session }, 1500);
+  const cwd: string | undefined = input?.cwd;
+  if ((!session && !cwd) || !PRIORITIZE.test(prompt)) return;
+  // Session for agents whose builds carry the same id (Claude Code); folder for the rest (Codex).
+  const reply = await ask({ op: "prioritize", session, cwd }, 1500);
   if (reply?.type !== "ok") return;
   emit({
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
-      additionalContext: `Bouncer: this session's builds and tests now run first (${reply.message}). Other sessions' jobs may be paused and rerun to make room.`,
+      additionalContext: `Bouncer: builds from this session and project now run first (${reply.message}). Other jobs may be paused and rerun to make room.`,
     },
   });
 }

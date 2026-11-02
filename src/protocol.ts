@@ -8,12 +8,21 @@ export type JobState = "queued" | "running" | "done" | "preempted" | "reaped" | 
 export type Load = "green" | "yellow" | "red";
 
 export type ClientMsg =
-  | { op: "admit"; slot: string; cmd: string; cwd: string; session: string; pid: number }
+  | {
+      op: "admit";
+      slot: string;
+      cmd: string;
+      cwd: string;
+      session: string;
+      pid: number;
+      /** False for commands that must not be killed and rerun (migrations, publish, installs). */
+      preemptible?: boolean;
+    }
   | { op: "started"; job: number; childPid: number }
   | { op: "done"; job: number; exitCode: number }
   | { op: "requeue"; job: number }
   | { op: "probe"; slots: string[]; session: string }
-  | { op: "prioritize"; session?: string; job?: number; clear?: boolean }
+  | { op: "prioritize"; session?: string; job?: number; cwd?: string; clear?: boolean }
   | { op: "cancel"; job: number }
   | { op: "status" }
   | { op: "history"; limit: number }

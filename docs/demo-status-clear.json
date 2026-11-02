@@ -1,0 +1,62 @@
+{
+ "version": "0.3.0",
+ "pid": 4121,
+ "startedAt": 0,
+ "load": "green",
+ "pressureLevel": 1,
+ "freePercent": 64,
+ "swapUsedMb": 1200,
+ "swapTotalMb": 8192,
+ "diskFreeGb": 112,
+ "maxConcurrent": 2,
+ "slots": [
+  {
+   "name": "dotnet",
+   "capacity": 1,
+   "used": 0
+  },
+  {
+   "name": "node",
+   "capacity": 2,
+   "used": 0
+  },
+  {
+   "name": "xcode",
+   "capacity": 1,
+   "used": 0
+  }
+ ],
+ "running": [],
+ "queued": [],
+ "external": [],
+ "sessions": [
+  {
+   "pid": 30112,
+   "kind": "claude",
+   "cwd": "/Users/sam/code/orbit",
+   "rssMb": 3410,
+   "elapsedSec": 15200,
+   "idleSec": 20
+  },
+  {
+   "pid": 30480,
+   "kind": "claude",
+   "cwd": "/Users/sam/code/orbit-billing",
+   "rssMb": 512,
+   "elapsedSec": 9100,
+   "idleSec": 40
+  },
+  {
+   "pid": 29870,
+   "kind": "codex",
+   "cwd": "/Users/sam/code/lantern",
+   "rssMb": 388,
+   "elapsedSec": 22000,
+   "idleSec": 300
+  }
+ ],
+ "advice": [],
+ "prioritized": [],
+ "jetsamSinceStart": 0,
+ "topProcesses": []
+}

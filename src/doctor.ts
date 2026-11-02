@@ -1,10 +1,13 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { agents } from "./agents";
 import { shimmedTools } from "./classify";
 import { ask } from "./conn";
-import { LAUNCHD_LABEL, paths } from "./paths";
+import { readJson } from "./files";
+import { describe, recommend, scanMachine } from "./machine";
+import { launchdLabel, paths, userHome } from "./paths";
 import { loadPolicy } from "./policy";
+import { mark, out } from "./term";
 import { VERSION } from "./version";
 
 // `bouncer doctor`: every way an install can be quietly broken on someone else's machine,
@@ -17,10 +20,7 @@ interface Check {
   fix?: string;
 }
 
-const tty = process.stdout.isTTY;
-const mark: Record<Level, string> = tty
-  ? { ok: "\x1b[32m✓\x1b[0m", warn: "\x1b[33m!\x1b[0m", fail: "\x1b[31m✗\x1b[0m" }
-  : { ok: "ok  ", warn: "warn", fail: "FAIL" };
+const glyph: Record<Level, () => string> = { ok: mark.ok, warn: mark.warn, fail: mark.fail };
 
 function mode(path: string): number {
   return statSync(path).mode & 0o777;
@@ -32,7 +32,7 @@ function loginShell(script: string): string {
   const r = Bun.spawnSync([shell, "-ilc", script], {
     stdout: "pipe",
     stderr: "ignore",
-    env: { HOME: homedir(), TERM: "dumb" },
+    env: { HOME: userHome(), TERM: "dumb" },
   });
   return r.stdout.toString();
 }
@@ -68,12 +68,12 @@ export async function doctorCommand(): Promise<void> {
   }
 
   // Daemon
-  const launchd = Bun.spawnSync(["/bin/launchctl", "print", `gui/${process.getuid?.()}/${LAUNCHD_LABEL}`], {
+  const launchd = Bun.spawnSync(["/bin/launchctl", "print", `gui/${process.getuid?.()}/${launchdLabel()}`], {
     stdout: "ignore",
     stderr: "ignore",
   });
-  if (launchd.exitCode === 0) add("ok", `launchd job ${LAUNCHD_LABEL} loaded`);
-  else add("fail", `launchd job ${LAUNCHD_LABEL} not loaded`, "run `bouncer install`");
+  if (launchd.exitCode === 0) add("ok", `launchd job ${launchdLabel()} loaded`);
+  else add("fail", `launchd job ${launchdLabel()} not loaded`, "run `bouncer install`");
   const reply = await ask({ op: "status" }, 1500);
   if (reply?.type === "status") {
     const s = reply.status;
@@ -107,10 +107,10 @@ export async function doctorCommand(): Promise<void> {
 
   // PATH, as a new shell sees it
   const marker = "__BOUNCER_DOCTOR__";
-  const out = loginShell(
+  const shellOutput = loginShell(
     `echo "${marker}PATH=$PATH"; for t in ${tools.join(" ")}; do printf "${marker}%s=%s\\n" "$t" "$(command -v $t 2>/dev/null)"; done`,
   );
-  const lines = out
+  const lines = shellOutput
     .split("\n")
     .filter((l) => l.startsWith(marker))
     .map((l) => l.slice(marker.length));
@@ -141,25 +141,40 @@ export async function doctorCommand(): Promise<void> {
     if (missing.length) add("ok", `not installed here (nothing to gate): ${missing.join(", ")}`);
   }
 
-  // Claude Code hooks
-  const settingsFiles = [join(homedir(), ".claude", "settings.json")];
-  if (process.env.CLAUDE_CONFIG_DIR) settingsFiles.push(join(process.env.CLAUDE_CONFIG_DIR, "settings.json"));
-  const seen = new Set<string>();
-  for (const file of settingsFiles) {
-    if (seen.has(file) || !existsSync(file)) continue;
-    seen.add(file);
+  // Agents: each one chosen in setup must still be connected (an agent update or a hand edit can
+  // drop hooks). Without a setup.json (pre-0.5 install), check whatever is installed.
+  let chosen: string[] | null = null;
+  try {
+    chosen = (readJson(join(paths.home, "setup.json")).agents as string[] | undefined) ?? null;
+  } catch {}
+  for (const agent of agents()) {
+    if (agent.level === "shims" || !agent.detect()) continue;
+    const wanted = chosen ? chosen.includes(agent.id) : agent.id === "claude";
+    if (!wanted) continue;
     try {
-      const text = readFileSync(file, "utf8");
-      const settings = JSON.parse(text);
-      const hasPre = JSON.stringify(settings.hooks?.PreToolUse ?? []).includes("bouncer hook pre-tool");
-      const hasPrompt = JSON.stringify(settings.hooks?.UserPromptSubmit ?? []).includes("bouncer hook prompt");
-      if (hasPre && hasPrompt) add("ok", `Claude Code hooks in ${file.replace(homedir(), "~")}`);
-      else add("warn", `Claude Code hooks missing in ${file.replace(homedir(), "~")}`, "run `bouncer install`");
-    } catch {
-      add("warn", `could not parse ${file}`);
+      if (agent.connected()) {
+        add("ok", `${agent.name} connected`);
+        if (agent.followUp) add("ok", out.dim(agent.followUp));
+      } else add("warn", `${agent.name} was chosen in setup but isn't connected`, "run `bouncer setup`");
+    } catch (e) {
+      add("warn", `could not read ${agent.name}'s config: ${(e as Error).message}`);
     }
   }
-  if (!seen.size) add("ok", "no Claude Code settings found (hooks skipped; shims still gate builds)");
+
+  // Policy vs this machine
+  try {
+    const machine = scanMachine();
+    const sessions = (readJson(join(paths.home, "setup.json")).sessions as number | undefined) ?? 6;
+    const tuned = recommend(machine, sessions);
+    const policy = loadPolicy();
+    if (policy.maxConcurrent > tuned.maxConcurrent + 1) {
+      add(
+        "warn",
+        `policy allows ${policy.maxConcurrent} heavy jobs at once; this Mac (${machine.memoryGb} GB) is tuned for ${tuned.maxConcurrent}`,
+        "`bouncer tune` to compare, `bouncer tune --apply` to adopt",
+      );
+    } else add("ok", `limits fit this Mac (${describe(machine)})`);
+  } catch {}
 
   // Machine
   if (reply?.type === "status") {
@@ -176,10 +191,16 @@ export async function doctorCommand(): Promise<void> {
   }
 
   for (const c of checks) {
-    console.log(`${mark[c.level]} ${c.title}`);
-    if (c.fix && c.level !== "ok") console.log(`    ${tty ? "\x1b[2m" : ""}fix: ${c.fix}${tty ? "\x1b[0m" : ""}`);
+    console.log(`${glyph[c.level]()} ${c.level === "ok" ? c.title : out.bold(c.title)}`);
+    if (c.fix && c.level !== "ok") console.log(`  ${out.dim(`fix: ${c.fix}`)}`);
   }
   const failed = checks.filter((c) => c.level === "fail").length;
-  console.log(`\nbouncer ${VERSION} · ${failed ? `${failed} problem(s)` : "all good"}`);
+  const warned = checks.filter((c) => c.level === "warn").length;
+  const summary = failed
+    ? out.red(`${failed} problem${failed === 1 ? "" : "s"}`)
+    : warned
+      ? out.yellow(`${warned} warning${warned === 1 ? "" : "s"}`)
+      : out.green("all good");
+  console.log(`\n${out.bold(`bouncer ${VERSION}`)} · ${summary}`);
   if (failed) process.exit(1);
 }

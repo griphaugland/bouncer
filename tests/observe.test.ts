@@ -16,7 +16,7 @@ const p = (pid: number, ppid: number, command: string, rssKb = 1024, extra: Part
 describe("heavySlotOfProcess", () => {
   test.each([
     ["/opt/homebrew/bin/dotnet test", "dotnet"],
-    ["dotnet run --project src/Api", "dotnet"],
+    ["dotnet build src/Api", "dotnet"],
     ["node /opt/homebrew/bin/pnpm test", "node"],
     ["node /Users/x/.nvm/versions/node/v22/lib/node_modules/npm/bin/npm-cli.js run build", "node"],
     ["node /repo/node_modules/vitest/vitest.mjs run", "node"],
@@ -33,6 +33,8 @@ describe("heavySlotOfProcess", () => {
     "node /repo/node_modules/typescript/lib/tsserver.js",
     "node /ext/vscode-eslint/server/out/eslintServer.js --stdio",
     "/bin/zsh -c dotnet test",
+    "dotnet run --project src/Api",
+    "dotnet bin/Release/Api.dll",
     "grep vitest",
   ])("light: %s", (cmd) => expect(heavySlotOfProcess(cmd)).toBeNull());
 });
@@ -100,9 +102,9 @@ describe("advise", () => {
       diskFreeGb: 34,
       minFreeDiskGb: 40,
     });
-    expect(out[0]).toContain("1 agent session idle for 1h+ hold 0.9 GB");
+    expect(out[0]).toBe("1 session idle for 1h+ holds 0.9 GB. Closing it frees the most.");
     expect(out[1]).toBe(
-      "A dotnet build Bouncer didn't start is using 1.2 GB (pid 9). Restart the session that runs it so its builds queue.",
+      "An outside dotnet build is using 1.2 GB. Restart the session that started it so its builds queue.",
     );
     expect(out[2]).toContain("Only 34 GB disk free");
   });

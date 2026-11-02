@@ -21,6 +21,8 @@ export interface Job {
   peakRssMb: number;
   rssMb: number;
   preemptCount: number;
+  /** False for jobs that must not be killed halfway: never preempted, never reaped. */
+  preemptible: boolean;
   exitCode?: number;
   waitReason?: string;
 }
@@ -53,11 +55,12 @@ export class Scheduler {
     private nextId = 1,
   ) {}
 
-  enqueue(input: { slot: string; session: string; cwd: string; cmd: string }, now: number): Job {
+  enqueue(input: { slot: string; session: string; cwd: string; cmd: string; preemptible?: boolean }, now: number): Job {
     const job: Job = {
       ...input,
+      preemptible: input.preemptible ?? true,
       id: this.nextId++,
-      priority: this.isPrioritized(input.session, now) ? "high" : "normal",
+      priority: this.isPrioritized(input.session, now, input.cwd) ? "high" : "normal",
       state: "queued",
       order: ++this.orderCounter,
       queuedAt: now,
@@ -69,30 +72,58 @@ export class Scheduler {
     return job;
   }
 
-  isPrioritized(session: string, now: number): boolean {
-    const until = this.prioritized.get(session);
-    if (until === undefined) return false;
-    if (until <= now) {
-      this.prioritized.delete(session);
-      for (const j of this.active()) if (j.session === session) j.priority = "normal";
-      return false;
+  // Priority targets are a session ("session:<id>") or a project folder ("cwd:<path>"). Folders
+  // exist because some agents' hooks see a different session id than their builds do (Codex):
+  // "prioritize this" then means "this project's builds go first".
+  private static matches(target: string, session: string, cwd?: string): boolean {
+    if (target === `session:${session}`) return true;
+    if (!cwd || !target.startsWith("cwd:")) return false;
+    const dir = target.slice(4);
+    return cwd === dir || cwd.startsWith(`${dir}/`);
+  }
+
+  private expire(now: number): void {
+    let changed = false;
+    for (const [target, until] of this.prioritized) {
+      if (until <= now) {
+        this.prioritized.delete(target);
+        changed = true;
+      }
     }
-    return true;
+    if (changed) this.repriorititize();
+  }
+
+  private repriorititize(): void {
+    for (const j of this.active()) {
+      const high = [...this.prioritized.keys()].some((t) => Scheduler.matches(t, j.session, j.cwd));
+      j.priority = high ? "high" : "normal";
+    }
+  }
+
+  isPrioritized(session: string, now: number, cwd?: string): boolean {
+    this.expire(now);
+    return [...this.prioritized.keys()].some((t) => Scheduler.matches(t, session, cwd));
   }
 
   prioritizeSession(session: string, now: number): void {
-    this.prioritized.set(session, now + this.policy.priority.minutes * 60_000);
-    for (const j of this.active()) if (j.session === session) j.priority = "high";
+    this.prioritized.set(`session:${session}`, now + this.policy.priority.minutes * 60_000);
+    this.repriorititize();
   }
 
-  clearPriority(session: string): void {
-    this.prioritized.delete(session);
-    for (const j of this.active()) if (j.session === session) j.priority = "normal";
+  prioritizeCwd(cwd: string, now: number): void {
+    this.prioritized.set(`cwd:${cwd.replace(/\/+$/, "")}`, now + this.policy.priority.minutes * 60_000);
+    this.repriorititize();
+  }
+
+  clearPriority(session: string, cwd?: string): void {
+    this.prioritized.delete(`session:${session}`);
+    if (cwd) this.prioritized.delete(`cwd:${cwd.replace(/\/+$/, "")}`);
+    this.repriorititize();
   }
 
   prioritizedSessions(now: number): { session: string; until: number }[] {
-    for (const s of [...this.prioritized.keys()]) this.isPrioritized(s, now);
-    return [...this.prioritized].map(([session, until]) => ({ session, until }));
+    this.expire(now);
+    return [...this.prioritized].map(([target, until]) => ({ session: target.replace(/^(session|cwd):/, ""), until }));
   }
 
   active(): Job[] {
@@ -238,7 +269,7 @@ export class Scheduler {
     }
 
     if (this.load === "red" && now - this.lastReapAt >= this.policy.reaper.cooldownSeconds * 1000) {
-      const victim = newest(running.filter((j) => j.priority === "normal" && !j.stopping));
+      const victim = newest(running.filter((j) => j.priority === "normal" && !j.stopping && j.preemptible));
       if (victim) {
         victim.stopping = "reap";
         victim.stoppingSince = now;
@@ -254,7 +285,7 @@ export class Scheduler {
     const relevant = running.filter((r) => (slotFull ? r.slot === job.slot : true));
     // Something is already being stopped to make this room; wait for it instead of killing more.
     if (relevant.some((r) => r.stopping === "preempt")) return undefined;
-    return newest(relevant.filter((r) => r.priority === "normal" && !r.stopping));
+    return newest(relevant.filter((r) => r.priority === "normal" && !r.stopping && r.preemptible));
   }
 }
 

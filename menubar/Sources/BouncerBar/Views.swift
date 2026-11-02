@@ -29,34 +29,43 @@ struct MenuBarLabel: View {
         }
     }
 
+    /// A 270° gauge, open at the bottom like a dial: reads as "how full", never as a spinner.
     private func ring(usedFraction: Double, load: Load?) -> NSImage {
         let size = NSSize(width: 16, height: 16)
         let image = NSImage(size: size, flipped: false) { rect in
-            let inset = rect.insetBy(dx: 2, dy: 2)
-            let track = NSBezierPath(ovalIn: inset)
-            track.lineWidth = 2
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let radius = rect.width / 2 - 2
+            let start: CGFloat = 225 // bottom-left
+            let sweep: CGFloat = 270
             let quiet = load == nil || load == .green
-            (quiet ? NSColor.black.withAlphaComponent(0.3) : NSColor.secondaryLabelColor).setStroke()
+
+            let track = NSBezierPath()
+            track.appendArc(withCenter: center, radius: radius, startAngle: start, endAngle: start - sweep, clockwise: true)
+            track.lineWidth = 2
+            track.lineCapStyle = .round
+            // Template images take one colour; alpha is what separates track from fill.
+            (quiet ? NSColor.black.withAlphaComponent(0.3) : NSColor(white: 0.5, alpha: 0.45)).setStroke()
             track.stroke()
 
-            let arc = NSBezierPath()
-            let center = NSPoint(x: rect.midX, y: rect.midY)
-            arc.appendArc(withCenter: center, radius: inset.width / 2, startAngle: 90,
-                          endAngle: 90 - 360 * max(0.04, min(1, usedFraction)), clockwise: true)
-            arc.lineWidth = 2
-            arc.lineCapStyle = .round
-            switch load {
-            case .yellow?: NSColor.systemOrange.setStroke()
-            case .red?: NSColor.systemRed.setStroke()
-            default: NSColor.black.setStroke()
-            }
-            arc.stroke()
-            if load == nil {
-                // Daemon unreachable: a small slash through the ring.
+            if load != nil {
+                let fill = NSBezierPath()
+                let used = CGFloat(max(0.06, min(1, usedFraction)))
+                fill.appendArc(withCenter: center, radius: radius, startAngle: start, endAngle: start - sweep * used, clockwise: true)
+                fill.lineWidth = 2
+                fill.lineCapStyle = .round
+                switch load {
+                case .yellow?: NSColor.systemOrange.setStroke()
+                case .red?: NSColor.systemRed.setStroke()
+                default: NSColor.black.setStroke()
+                }
+                fill.stroke()
+            } else {
+                // Daemon unreachable: an empty gauge, struck through.
                 let slash = NSBezierPath()
-                slash.move(to: NSPoint(x: inset.minX, y: inset.minY))
-                slash.line(to: NSPoint(x: inset.maxX, y: inset.maxY))
+                slash.move(to: NSPoint(x: rect.minX + 3.5, y: rect.minY + 3.5))
+                slash.line(to: NSPoint(x: rect.maxX - 3.5, y: rect.maxY - 3.5))
                 slash.lineWidth = 1.5
+                slash.lineCapStyle = .round
                 NSColor.black.setStroke()
                 slash.stroke()
             }
@@ -64,6 +73,7 @@ struct MenuBarLabel: View {
         }
         // Template images follow the menu bar's light/dark appearance automatically.
         image.isTemplate = load == nil || load == .green
+        image.accessibilityDescription = load.map { "Bouncer: \($0.title)" } ?? "Bouncer: not running"
         return image
     }
 }
@@ -73,7 +83,7 @@ struct MenuBarLabel: View {
 struct PopoverView: View {
     let store: StatusStore
     var sessionsExpanded = false
-    /// Snapshot rendering: no ScrollView and no AppKit-backed controls, which ImageRenderer can't draw.
+    /// Snapshot rendering: no ScrollView, which ImageRenderer can't draw.
     var forSnapshot = false
 
     private func sections(_ s: Status) -> some View {
@@ -103,10 +113,8 @@ struct PopoverView: View {
             } else {
                 Unreachable(store: store)
             }
-            if !forSnapshot {
-                Divider()
-                Footer(store: store)
-            }
+            Divider()
+            Footer(store: store)
         }
         .frame(width: 380)
         .onAppear { store.isOpen = true }
@@ -373,20 +381,102 @@ private struct SessionsSection: View {
 private struct Unreachable: View {
     let store: StatusStore
 
+    private static let installCommand = "brew install griphaugland/tap/bouncer && bouncer install"
+
     var body: some View {
+        let notInstalled = store.problem == "Bouncer isn't installed."
         VStack(alignment: .leading, spacing: 10) {
-            Text(store.problem ?? "Connecting…").font(.title3.weight(.semibold))
-            Text("Builds run unguarded until it's back. Nothing is blocked.")
-                .font(.callout).foregroundStyle(.secondary)
-            if store.problem == "Bouncer isn't running." {
-                Button("Start Bouncer") { Task { await store.startDaemon() } }
-                    .keyboardShortcut(.defaultAction)
-            } else if store.problem == "Bouncer isn't installed." {
-                Text("Run `bun run install-local` in the bouncer repo.").font(.caption.monospaced()).foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Circle().fill(notInstalled ? Color.secondary : Color(nsColor: .systemRed)).frame(width: 8, height: 8)
+                Text(notInstalled ? "Bouncer isn't set up" : (store.problem ?? "Connecting…"))
+                    .font(.title3.weight(.semibold))
+            }
+            if notInstalled {
+                Text("This app shows Bouncer's queue. Install the command-line tool and its daemon first:")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                CommandBlock(command: Self.installCommand)
+            } else {
+                Text("Builds run unguarded until it's back. Nothing is blocked.")
+                    .font(.callout).foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Button("Start Bouncer") { Task { await store.startDaemon() } }
+                        .buttonStyle(PrimaryButtonStyle())
+                        .keyboardShortcut(.defaultAction)
+                    Text("or run bouncer doctor").font(.caption).foregroundStyle(.tertiary)
+                }
+                .padding(.top, 2)
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A shell command the user is meant to copy, with a copy button that confirms itself.
+private struct CommandBlock: View {
+    let command: String
+    @State private var copied = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(command)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(command, forType: .string)
+                copied = true
+                Task {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    copied = false
+                }
+            } label: {
+                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption)
+            }
+            .buttonStyle(PressableStyle())
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 7).fill(.quaternary.opacity(0.5)))
+    }
+}
+
+/// The one filled button in the app: the action that fixes the state you're looking at.
+private struct PrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.callout.weight(.medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.accentColor))
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Quiet text buttons for the footer: secondary until hovered.
+private struct FooterButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        FooterLabel(configuration: configuration)
+    }
+
+    private struct FooterLabel: View {
+        let configuration: ButtonStyleConfiguration
+        @State private var hovering = false
+
+        var body: some View {
+            configuration.label
+                .font(.caption)
+                .foregroundStyle(hovering ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .opacity(configuration.isPressed ? 0.6 : 1)
+                .contentShape(Rectangle())
+                .onHover { hovering = $0 }
+        }
     }
 }
 
@@ -395,27 +485,34 @@ private struct Footer: View {
     @State private var openAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
-        HStack(spacing: 12) {
-            Button("Log") {
-                NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".bouncer/daemon.log"))
+        HStack(spacing: 14) {
+            Button {
+                setOpenAtLogin(!openAtLogin)
+            } label: {
+                Label("Open at login", systemImage: openAtLogin ? "checkmark.circle.fill" : "circle")
+                    .labelStyle(.titleAndIcon)
             }
-            Button("Policy") {
-                NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".bouncer/policy.yaml"))
-            }
-            Toggle("Open at login", isOn: $openAtLogin)
-                .toggleStyle(.checkbox)
-                .onChange(of: openAtLogin) { _, on in
-                    do {
-                        if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-                    } catch {
-                        openAtLogin = SMAppService.mainApp.status == .enabled
-                    }
-                }
+            .accessibilityValue(openAtLogin ? "on" : "off")
             Spacer()
+            // Nothing to open before the CLI is installed.
+            if store.problem != "Bouncer isn't installed." {
+                Button("Log") { open(".bouncer/daemon.log") }
+                Button("Policy") { open(".bouncer/policy.yaml") }
+            }
             Button("Quit") { NSApp.terminate(nil) }.keyboardShortcut("q")
         }
-        .buttonStyle(.link)
-        .font(.caption)
+        .buttonStyle(FooterButtonStyle())
         .padding(.horizontal, 16).padding(.vertical, 10)
+    }
+
+    private func open(_ relative: String) {
+        NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(relative))
+    }
+
+    private func setOpenAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {}
+        openAtLogin = SMAppService.mainApp.status == .enabled
     }
 }

@@ -35,3 +35,15 @@ describe("descendants", () => {
     ).toEqual([3, 4]);
   });
 });
+
+import { homebrewStablePath } from "../src/install";
+
+test("Homebrew installs link to the version-independent opt path", () => {
+  // Real paths on this machine only exist if bouncer is brew-installed, so test the mapping shape.
+  expect(homebrewStablePath("/Users/x/.bouncer/bouncer")).toBeNull();
+  expect(homebrewStablePath("/usr/local/bin/bouncer")).toBeNull();
+  const brewDotnet = "/opt/homebrew/Cellar/dotnet/10.0.400/bin/dotnet";
+  const expected = "/opt/homebrew/opt/dotnet/bin/dotnet";
+  const { existsSync } = require("node:fs");
+  expect(homebrewStablePath(brewDotnet)).toBe(existsSync(expected) ? expected : null);
+});

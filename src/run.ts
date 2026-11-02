@@ -1,15 +1,18 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, realpathSync } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { basename, delimiter, join } from "node:path";
-import { classifyInvocation, DEFAULT_TOOL_RULES, type ToolRules } from "./classify";
+import { classifyInvocation, DEFAULT_TOOL_RULES, safeToRestart, type ToolRules } from "./classify";
 import { Conn } from "./conn";
 import { paths } from "./paths";
 import { getPlatform, killTree } from "./platform";
 import { loadPolicy } from "./policy";
 import type { ServerMsg } from "./protocol";
+import { err } from "./term";
 
 const STOP_GRACE_MS = 10_000;
 const GATE_CONNECT_MS = 10_000;
+// Covers a daemon restarting onto an upgraded binary; see Conn.open.
+const RESTART_RETRY_MS = 2_000;
 
 /** Tool rules from the policy; a broken policy file must never stop a build, so fall back. */
 export function safeTools(): ToolRules {
@@ -21,7 +24,7 @@ export function safeTools(): ToolRules {
 }
 
 function say(line: string): void {
-  process.stderr.write(`\x1b[2m[bouncer] ${line}\x1b[0m\n`);
+  process.stderr.write(`${err.dim(`[bouncer] ${line}`)}\n`);
 }
 
 /** Who is asking. Claude Code exports its session id into every Bash command it runs. */
@@ -34,16 +37,32 @@ export function sessionId(): string {
   );
 }
 
-/** First executable named `name` on PATH that is not one of our shims. */
+function real(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * First executable named `name` on PATH that is not one of our shims. Compares resolved paths,
+ * so a trailing slash, a double slash or a symlinked folder can't make a shim find itself and
+ * exec itself forever (review #7).
+ */
 export function resolveReal(name: string): string | null {
   if (name.includes("/")) return name;
+  const shimDir = real(paths.shimDir);
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     if (!dir || dir === paths.shimDir) continue;
     const candidate = join(dir, name);
     try {
       accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {}
+    } catch {
+      continue;
+    }
+    if (shimDir && (real(dir) === shimDir || real(candidate)?.startsWith(`${shimDir}/`))) continue;
+    return candidate;
   }
   return null;
 }
@@ -91,7 +110,16 @@ async function passthrough(real: string, args: string[]): Promise<never> {
  * The gate. Ask the daemon for a slot, wait for our turn, run the command, report back.
  * If preempted, kill the command and run it again when the slot comes back.
  */
-export async function gatedRun(opts: { tool: string; real: string; args: string[]; slot?: string }): Promise<never> {
+export async function gatedRun(opts: {
+  tool: string;
+  real: string;
+  args: string[];
+  slot?: string;
+  /** `bouncer run -- <anything>`: not a command Bouncer understands, so never restarted. */
+  unknownCommand?: boolean;
+  /** `bouncer run --restartable`: the user vouches that killing and rerunning is safe. */
+  restartable?: boolean;
+}): Promise<never> {
   const { real, args } = opts;
   if (process.env.BOUNCER_JOB || process.env.BOUNCER_BYPASS) return passthrough(real, args);
 
@@ -100,7 +128,7 @@ export async function gatedRun(opts: { tool: string; real: string; args: string[
 
   // A dead daemon refuses instantly, so this long wait only applies to a live but slow one:
   // under memory pressure the daemon may be swapped out, which is exactly when the gate matters.
-  const conn = await Conn.open(GATE_CONNECT_MS);
+  const conn = await Conn.open(GATE_CONNECT_MS, undefined, RESTART_RETRY_MS);
   if (!conn) {
     say("daemon not running, running unguarded");
     return passthrough(real, args);
@@ -157,7 +185,15 @@ export async function gatedRun(opts: { tool: string; real: string; args: string[
     }
   });
 
-  conn.send({ op: "admit", slot, cmd, cwd: process.cwd(), session: sessionId(), pid: process.pid });
+  conn.send({
+    op: "admit",
+    slot,
+    cmd,
+    cwd: process.cwd(),
+    session: sessionId(),
+    pid: process.pid,
+    preemptible: opts.restartable || safeToRestart(opts.tool, args, !opts.unknownCommand),
+  });
 
   relaySignals(
     () => child,
@@ -169,6 +205,13 @@ export async function gatedRun(opts: { tool: string; real: string; args: string[
 
   while (true) {
     await runGate;
+    // A preempt that arrived between "run" and here hit nothing yet: hand the slot back and wait.
+    if (stopReason === "preempt" && !daemonGone && jobId !== undefined) {
+      stopReason = undefined;
+      runGate = waitForRun();
+      conn.send({ op: "requeue", job: jobId });
+      continue;
+    }
     const env = { ...process.env, BOUNCER_JOB: String(jobId ?? "unguarded") };
     child = Bun.spawn([real, ...args], { stdio: ["inherit", "inherit", "inherit"], env });
     if (jobId !== undefined && !daemonGone) conn.send({ op: "started", job: jobId, childPid: child.pid });
@@ -176,7 +219,10 @@ export async function gatedRun(opts: { tool: string; real: string; args: string[
     const code = exitCodeOf(child);
     child = undefined;
 
-    if (stopReason === "preempt" && !daemonGone && jobId !== undefined) {
+    // Rerun only if the kill actually landed: a job that finished on its own before the signal
+    // arrived is done, not preempted (review #8).
+    const killed = code !== 0;
+    if (stopReason === "preempt" && killed && !daemonGone && jobId !== undefined) {
       stopReason = undefined;
       runGate = waitForRun();
       conn.send({ op: "requeue", job: jobId });
@@ -196,16 +242,18 @@ export async function gatedRun(opts: { tool: string; real: string; args: string[
 /** `bouncer run [--slot name] -- <cmd> [args...]` */
 export async function runCommand(argv: string[]): Promise<never> {
   let slot: string | undefined;
+  let restartable = false;
   let i = 0;
   while (i < argv.length && argv[i] !== "--") {
     if (argv[i] === "--slot") slot = argv[++i];
+    else if (argv[i] === "--restartable") restartable = true;
     else break;
     i++;
   }
   if (argv[i] === "--") i++;
   const [cmd, ...args] = argv.slice(i);
   if (!cmd) {
-    console.error("usage: bouncer run [--slot name] -- <command> [args...]");
+    console.error("usage: bouncer run [--slot name] [--restartable] -- <command> [args...]");
     process.exit(2);
   }
   const real = resolveReal(cmd);
@@ -214,5 +262,6 @@ export async function runCommand(argv: string[]): Promise<never> {
     process.exit(127);
   }
   const tool = basename(cmd);
-  return gatedRun({ tool, real, args, slot: slot ?? classifyInvocation(tool, args, safeTools()) ?? "misc" });
+  const known = classifyInvocation(tool, args, safeTools());
+  return gatedRun({ tool, real, args, slot: slot ?? known ?? "misc", unknownCommand: !known, restartable });
 }

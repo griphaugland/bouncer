@@ -2,34 +2,40 @@ import { ask } from "./conn";
 import type { JobView, Load, StatusSnapshot } from "./protocol";
 import { sessionId } from "./run";
 import { nextClockTime, parseDelay, pickEnv } from "./schedule";
+import { err, mark, out, padEnd, padStart, type Tone, tone, truncate, width } from "./term";
 import { VERSION } from "./version";
 
-const tty = process.stdout.isTTY;
-const c = (code: string, s: string) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
-const dim = (s: string) => c("2", s);
-const bold = (s: string) => c("1", s);
-const LOAD_COLOR: Record<Load, string> = { green: "32", yellow: "33", red: "31" };
+const LOAD_TONE: Record<Load, Tone> = { green: "green", yellow: "yellow", red: "red" };
+const LOAD_TITLE: Record<Load, string> = { green: "Clear", yellow: "Tight", red: "Holding the door" };
 const PRESSURE: Record<number, string> = { 1: "normal", 2: "warn", 4: "critical" };
 
-function duration(ms: number): string {
-  const s = Math.round(ms / 1000);
+export function duration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
-  return m < 60
-    ? `${m}m${String(s % 60).padStart(2, "0")}s`
-    : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h${String(m % 60).padStart(2, "0")}m`;
+  return `${Math.floor(h / 24)}d${String(h % 24).padStart(2, "0")}h`;
 }
 
-function shortSession(s: string): string {
-  return s.length > 14 ? `${s.slice(0, 8)}…` : s;
+/** Coarse age for long-lived things: "5m", "4h13m", "3d". */
+function age(sec: number): string {
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${Math.max(m, 0)}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h${String(m % 60).padStart(2, "0")}m`;
+  return `${Math.floor(h / 24)}d`;
 }
 
-function trim(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+function size(mb: number): string {
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 }
 
 function notRunning(): never {
-  console.error("bouncer: daemon is not running. Start it with `bouncer install` or `bouncer daemon`.");
+  console.error(
+    `bouncer: the daemon isn't running. Start it with ${out.bold("bouncer install")}, or check ${out.bold("bouncer doctor")}.`,
+  );
   process.exit(1);
 }
 
@@ -38,20 +44,10 @@ async function fetchStatus(): Promise<StatusSnapshot> {
   if (reply?.type !== "status") notRunning();
   if (reply.status.version !== VERSION) {
     process.stderr.write(
-      `bouncer: the running daemon is v${reply.status.version ?? "?"} but this CLI is v${VERSION}. Run \`bouncer install\` to restart it.\n`,
+      `${err.yellow("!")} the running daemon is v${reply.status.version ?? "?"}, this CLI is v${VERSION}. Run ${err.bold("bouncer install")} to restart it.\n`,
     );
   }
   return reply.status;
-}
-
-function jobLine(j: JobView): string {
-  const prio = j.priority === "high" ? c("35", " ★") : "";
-  const time = duration(j.elapsedMs);
-  const extra =
-    j.state === "running"
-      ? `${String(j.rssMb).padStart(6)} MB  ${time}`
-      : `#${j.position} ${time}  ${dim(j.waitReason ?? "")}`;
-  return `  ${String(j.id).padStart(4)}  ${j.slot.padEnd(7)} ${shortSession(j.session).padEnd(10)} ${trim(j.cmd, 42).padEnd(42)} ${extra}${prio}`;
 }
 
 function homeRel(path?: string): string {
@@ -60,75 +56,121 @@ function homeRel(path?: string): string {
   return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
 }
 
-/** Compact segment for a statusline: quiet when idle, loud when something waits or memory is tight. */
+function basenameOf(path?: string): string {
+  return path ? (path.split("/").filter(Boolean).pop() ?? path) : "";
+}
+
+/** One line per job. Columns: id, slot, command (flexible), then right-aligned facts. */
+function jobLine(j: JobView, cmdWidth: number): string[] {
+  const prio = j.priority === "high" ? out.yellow("↑") : " ";
+  const facts =
+    j.state === "running"
+      ? `${padStart(size(j.rssMb), 8)}  ${padStart(duration(j.elapsedMs), 6)}`
+      : `${padStart(`#${j.position ?? "?"}`, 8)}  ${padStart(duration(j.elapsedMs), 6)}`;
+  // Prefix is 10 columns wide for jobs and outside builds alike, so their columns line up.
+  const lines = [
+    `${prio} ${padStart(out.dim(String(j.id)), 6)}  ${padEnd(j.slot, 7)} ${padEnd(truncate(j.cmd, cmdWidth), cmdWidth)}${facts}`,
+  ];
+  if (j.state !== "running" && j.waitReason) lines.push(`${" ".repeat(18)}${out.dim(j.waitReason)}`);
+  return lines;
+}
+
+function pips(used: number, outside: number, capacity: number): string {
+  let s = "";
+  for (let i = 0; i < Math.max(capacity, used + outside); i++) {
+    s += i < used ? "●" : i < used + outside ? out.yellow("●") : out.dim("○");
+  }
+  return s;
+}
+
+/** Compact segment for a statusline: quiet when idle, specific when something waits or memory is tight. */
 export function segment(st: StatusSnapshot): string {
-  const dot = c(LOAD_COLOR[st.load], "●");
+  const dot = mark.dot(LOAD_TONE[st.load]);
   const parts: string[] = [];
   if (st.running.length) parts.push(`${st.running.length} running`);
-  if (st.queued.length) parts.push(c("33", `${st.queued.length} queued`));
-  if (st.external.length) parts.push(c("33", `${st.external.length} outside`));
-  if (st.load !== "green") parts.push(c(LOAD_COLOR[st.load], `${st.freePercent}% free`));
-  return parts.length ? `${dot} bouncer ${parts.join(" · ")}` : `${dot} bouncer`;
+  if (st.queued.length) parts.push(out.yellow(`${st.queued.length} waiting`));
+  if (st.external.length) parts.push(out.yellow(`${st.external.length} outside`));
+  if (st.load !== "green") parts.push(tone(LOAD_TONE[st.load], `${st.freePercent}% free`));
+  return parts.length ? `${dot} bouncer ${parts.join(out.dim(" · "))}` : `${dot} bouncer`;
 }
 
 export function renderStatus(st: StatusSnapshot): string[] {
-  const out: string[] = [];
+  const lines: string[] = [];
+  const cmdWidth = Math.max(24, width() - 18 - 18);
+  const section = (title: string, detail?: string) => {
+    lines.push("", detail ? `${out.bold(title)}  ${out.dim(detail)}` : out.bold(title));
+  };
+
+  // Header: the state in words, then the numbers behind it.
   const pressure = PRESSURE[st.pressureLevel] ?? String(st.pressureLevel);
-  out.push(
-    `${c(LOAD_COLOR[st.load], `● ${st.load.toUpperCase()}`)}  memory ${st.freePercent}% free, pressure ${pressure}, swap ${(st.swapUsedMb / 1024).toFixed(1)}/${(st.swapTotalMb / 1024).toFixed(1)} GB`,
+  const facts = [
+    `${st.freePercent}% free`,
+    `pressure ${pressure}`,
+    `swap ${size(st.swapUsedMb)}`,
+    st.diskFreeGb >= 0 ? `disk ${st.diskFreeGb} GB` : "",
+  ].filter(Boolean);
+  lines.push(`${mark.dot(LOAD_TONE[st.load])} ${out.bold(LOAD_TITLE[st.load])}   ${out.dim(facts.join(" · "))}`);
+
+  // Slots in use as pips; idle ones summarized.
+  const outsideBySlot = new Map<string, number>();
+  for (const e of st.external) outsideBySlot.set(e.slot, (outsideBySlot.get(e.slot) ?? 0) + 1);
+  const busy = st.slots.filter((s) => s.used + (outsideBySlot.get(s.name) ?? 0) > 0);
+  const idle = st.slots.length - busy.length;
+  const slotText = busy.map((s) => `${s.name} ${pips(s.used, outsideBySlot.get(s.name) ?? 0, s.capacity)}`).join("   ");
+  lines.push(
+    `  ${slotText}${slotText ? "   " : ""}${out.dim(busy.length ? `${idle} more slot${idle === 1 ? "" : "s"} free` : `all ${idle} slots free`)}${out.dim(` · max ${st.maxConcurrent} at once`)}`,
   );
-  out.push(
-    dim(
-      `  slots: ${st.slots.map((s) => `${s.name} ${s.used}/${s.capacity}`).join("  ")}   max ${st.maxConcurrent} at once   disk ${st.diskFreeGb >= 0 ? `${st.diskFreeGb} GB free` : "?"}   jetsam since start: ${st.jetsamSinceStart}`,
-    ),
-  );
-  if (st.advice.length) {
-    out.push("", bold("Advice"));
-    for (const a of st.advice) out.push(`  ${c("33", "→")} ${a}`);
+  if (st.jetsamSinceStart > 0) {
+    lines.push(`  ${mark.warn()} macOS killed processes for memory ${st.jetsamSinceStart}× since Bouncer started`);
   }
-  out.push("", bold(`Running (${st.running.length})`));
-  if (!st.running.length) out.push(dim("  nothing"));
-  for (const j of st.running) out.push(jobLine(j));
-  out.push("", bold(`Queued (${st.queued.length})`));
-  if (!st.queued.length) out.push(dim("  nothing"));
-  for (const j of st.queued) out.push(jobLine(j));
+
+  if (st.advice.length) {
+    section("Worth doing");
+    for (const a of st.advice) lines.push(`  ${mark.arrow()} ${a}`);
+  }
+
+  section("Inside", st.running.length ? String(st.running.length) : undefined);
+  if (!st.running.length) lines.push(out.dim("  No heavy jobs running."));
+  for (const j of st.running) lines.push(...jobLine(j, cmdWidth));
+
+  section("In line", st.queued.length ? String(st.queued.length) : undefined);
+  if (!st.queued.length) lines.push(out.dim("  Nobody waiting."));
+  for (const j of st.queued) lines.push(...jobLine(j, cmdWidth));
+
   if (st.external.length) {
-    out.push(
-      "",
-      bold(`Outside Bouncer (${st.external.length})`) + dim("  heavy builds it did not start; they hold slots"),
-    );
+    section("Outside", "started without Bouncer, holding slots");
     for (const e of st.external) {
-      out.push(
-        `  ${String(e.pid).padStart(6)}  ${e.slot.padEnd(7)} ${trim(e.command.replace(/^\S*\//, ""), 52).padEnd(52)} ${String(e.rssMb).padStart(6)} MB  ${duration(e.elapsedSec * 1000)}`,
+      const cmd = e.command.replace(/^\S*\//, "");
+      lines.push(
+        `  ${padStart(out.dim(String(e.pid)), 6)}  ${padEnd(e.slot, 7)} ${padEnd(truncate(cmd, cmdWidth), cmdWidth)}${padStart(size(e.rssMb), 8)}  ${padStart(duration(e.elapsedSec * 1000), 6)}`,
       );
     }
   }
+
   if (st.prioritized.length) {
-    out.push("", bold("Prioritized sessions"));
+    section("Prioritized");
     for (const p of st.prioritized)
-      out.push(`  ${shortSession(p.session)}  until ${new Date(p.until).toLocaleTimeString()}`);
+      lines.push(`  ${truncate(p.session, 12)}  ${out.dim(`until ${new Date(p.until).toLocaleTimeString()}`)}`);
   }
+
   if (st.sessions.length) {
     const total = st.sessions.reduce((s, x) => s + x.rssMb, 0);
-    const claude = st.sessions.filter((s) => s.kind === "claude").length;
-    out.push(
-      "",
-      bold(`Sessions (${claude} claude, ${st.sessions.length - claude} codex)`) +
-        dim(`  ${(total / 1024).toFixed(1)} GB together`),
-    );
+    const idleCount = st.sessions.filter((s) => s.idleSec >= 3600).length;
+    section("Sessions", `${st.sessions.length} · ${size(total)}${idleCount ? ` · ${idleCount} idle 1h+` : ""}`);
     for (const s of st.sessions.slice(0, 8)) {
-      const idle = s.idleSec >= 300 ? c("33", `idle ${duration(s.idleSec * 1000)}`) : dim("active");
-      out.push(
-        `  ${String(s.pid).padStart(6)}  ${s.kind.padEnd(6)} ${String(s.rssMb).padStart(6)} MB  up ${duration(s.elapsedSec * 1000).padEnd(7)} ${idle.padEnd(tty ? 22 : 13)} ${dim(trim(homeRel(s.cwd), 50))}`,
+      const state =
+        s.idleSec >= 3600
+          ? out.yellow(`idle ${age(s.idleSec)}`)
+          : s.idleSec >= 300
+            ? `idle ${age(s.idleSec)}`
+            : out.dim("active");
+      lines.push(
+        `  ${padEnd(s.kind, 7)} ${padEnd(truncate(basenameOf(s.cwd) || `pid ${s.pid}`, 28), 28)} ${padStart(size(s.rssMb), 8)}  ${out.dim(padEnd(`up ${age(s.elapsedSec)}`, 10))} ${state}`,
       );
     }
-    if (st.sessions.length > 8) out.push(dim(`  … ${st.sessions.length - 8} more (bouncer status --json)`));
+    if (st.sessions.length > 8) lines.push(out.dim(`  ${st.sessions.length - 8} more · bouncer status --json`));
   }
-  out.push("", bold("Biggest memory users"));
-  for (const p of st.topProcesses.slice(0, 6)) {
-    out.push(`  ${String(p.rssMb).padStart(6)} MB  ${String(p.count).padStart(3)}×  ${p.name}`);
-  }
-  return out;
+  return lines;
 }
 
 export async function statusCommand(args: string[]): Promise<void> {
@@ -146,7 +188,7 @@ export async function statusCommand(args: string[]): Promise<void> {
   if (args.includes("--line")) {
     const slots = st.slots.map((s) => `${s.name} ${s.used}/${s.capacity}`).join(" · ");
     const q = st.queued.length ? ` · ${st.queued.length} queued` : "";
-    console.log(`${c(LOAD_COLOR[st.load], "●")} bouncer ${st.freePercent}% free · ${slots}${q}`);
+    console.log(`${mark.dot(LOAD_TONE[st.load])} bouncer ${st.freePercent}% free · ${slots}${q}`);
     return;
   }
   console.log(renderStatus(st).join("\n"));
@@ -167,8 +209,11 @@ export async function watchCommand(): Promise<void> {
     const lines =
       reply?.type === "status"
         ? renderStatus(reply.status)
-        : [c("31", "● bouncer daemon not running"), dim("  start it with `bouncer install`")];
-    lines.push("", dim(`updated ${new Date().toLocaleTimeString()} · Ctrl-C to exit`));
+        : [
+            `${mark.dot("red")} ${out.bold("Bouncer isn't running")}`,
+            out.dim("  Builds run unguarded. Start it with bouncer install."),
+          ];
+    lines.push("", out.dim(`updated ${new Date().toLocaleTimeString()} · Ctrl-C to exit`));
     write(`\x1b[H\x1b[2J${lines.join("\n")}`);
     await Bun.sleep(1000);
   }
@@ -178,11 +223,27 @@ export async function historyCommand(args: string[]): Promise<void> {
   const limit = Number(args[0]) || 20;
   const reply = await ask({ op: "history", limit });
   if (reply?.type !== "history") notRunning();
+  if (!reply.jobs.length) {
+    console.log(out.dim("No finished jobs yet."));
+    return;
+  }
+  const STATE: Record<string, string> = {
+    done: out.green("done"),
+    reaped: out.red("stopped"),
+    cancelled: out.dim("cancelled"),
+    preempted: out.yellow("preempted"),
+  };
+  console.log(
+    out.dim(
+      `${padStart("job", 5)}  ${padEnd("state", 10)}${padEnd("slot", 8)}${padStart("waited", 7)}${padStart("ran", 8)}${padStart("peak", 9)}  exit  command`,
+    ),
+  );
   for (const j of reply.jobs) {
     const waited = j.startedAt ? duration(j.startedAt - j.queuedAt) : "-";
     const ran = j.startedAt && j.endedAt ? duration(j.endedAt - j.startedAt) : "-";
+    const exit = j.exitCode === null ? "-" : j.exitCode === 0 ? "0" : out.red(String(j.exitCode));
     console.log(
-      `${String(j.id).padStart(5)}  ${j.state.padEnd(9)} ${j.slot.padEnd(7)} wait ${waited.padEnd(7)} ran ${ran.padEnd(7)} ${String(j.peakRssMb).padStart(6)} MB  exit ${String(j.exitCode ?? "-").padEnd(4)} ${trim(j.cmd, 50)}`,
+      `${padStart(out.dim(String(j.id)), 5)}  ${padEnd(STATE[j.state] ?? j.state, 10)}${padEnd(j.slot, 8)}${padStart(waited, 7)}${padStart(ran, 8)}${padStart(size(j.peakRssMb), 9)}  ${padEnd(exit, 4)}  ${truncate(j.cmd, Math.max(20, width() - 60))}`,
     );
   }
 }
@@ -261,14 +322,16 @@ export async function scheduleCommand(argv: string[]): Promise<void> {
   const when = [at ? `at ${new Date(at).toLocaleString()}` : "", whenIdle ? "when the machine is idle" : ""]
     .filter(Boolean)
     .join(", ");
-  console.log(`${reply.type === "ok" ? reply.message : "scheduled"}: ${cmd.join(" ")}  (${when})`);
+  console.log(
+    `${mark.ok()} ${out.bold(reply.type === "ok" ? (reply.message ?? "scheduled") : "scheduled")}  ${cmd.join(" ")}  ${out.dim(when)}`,
+  );
 }
 
 export async function scheduledCommand(args: string[]): Promise<void> {
   const reply = await ask({ op: "scheduled", all: args.includes("--all") });
   if (reply?.type !== "scheduled") notRunning();
   if (!reply.items.length) {
-    console.log(dim("nothing scheduled"));
+    console.log(out.dim("Nothing scheduled. Try: bouncer schedule --at 02:00 -- pnpm test"));
     return;
   }
   for (const r of reply.items) {
@@ -276,8 +339,9 @@ export async function scheduledCommand(args: string[]): Promise<void> {
     const idle = r.whenIdle ? " when idle" : "";
     const exit = r.exitCode !== null ? ` exit ${r.exitCode}` : "";
     console.log(
-      `  s${String(r.id).padEnd(4)} ${r.state.padEnd(9)} ${(when + idle).padEnd(28)} ${trim(r.argv.join(" "), 44).padEnd(44)}${exit}  ${dim(homeRel(r.logPath))}`,
+      `  ${padEnd(`s${r.id}`, 5)} ${padEnd(r.state, 10)}${padEnd(when + idle, 26)} ${truncate(r.argv.join(" "), 44)}${exit}`,
     );
+    console.log(`  ${" ".repeat(5)} ${out.dim(homeRel(r.logPath))}`);
   }
 }
 

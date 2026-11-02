@@ -2,9 +2,11 @@ import {
   appendFileSync,
   chmodSync,
   closeSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -16,7 +18,7 @@ import { takeLines } from "./lines";
 import { advise, agentSessions, type ExternalJob, externalJobs } from "./observe";
 import { paths } from "./paths";
 import { compilerServers, descendants, getPlatform, killTree, type LoadSample, type Proc } from "./platform";
-import { loadPolicy, type Policy } from "./policy";
+import { DEFAULT_POLICY, loadPolicy, type Policy } from "./policy";
 import {
   type ClientMsg,
   type JobView,
@@ -110,7 +112,17 @@ export async function runDaemon(): Promise<void> {
   chmodSync(paths.db, 0o600);
   const pruned = store.prune(Date.now() - HISTORY_DAYS * 86_400_000);
   if (pruned) log(`pruned ${pruned} history rows older than ${HISTORY_DAYS} days`);
-  let policy = loadPolicy();
+  // A broken policy.yaml must never take the daemon down: a crash loop would leave every build
+  // unguarded (review finding #3). Run on the defaults and say so in `bouncer status`.
+  let policyError: string | null = null;
+  let policy: Policy;
+  try {
+    policy = loadPolicy();
+  } catch (e) {
+    policy = DEFAULT_POLICY;
+    policyError = (e as Error).message;
+    log(`policy.yaml is invalid, running on defaults: ${policyError}`);
+  }
   let policyMtime = existsSync(paths.policy) ? statSync(paths.policy).mtimeMs : 0;
   const sched = new Scheduler(policy, store.maxId() + 1);
   const startedAt = Date.now();
@@ -235,7 +247,9 @@ export async function runDaemon(): Promise<void> {
       topProcesses,
       external,
       sessions,
-      advice,
+      advice: policyError
+        ? [`policy.yaml is invalid (${policyError}). Running on the defaults until it's fixed.`, ...advice]
+        : advice,
       diskFreeGb: Number.isFinite(diskFreeGb) ? Math.round(diskFreeGb) : -1,
     };
   };
@@ -308,7 +322,10 @@ export async function runDaemon(): Promise<void> {
     const now = Date.now();
     switch (msg.op) {
       case "admit": {
-        const job = sched.enqueue({ slot: msg.slot, session: msg.session, cwd: msg.cwd, cmd: redact(msg.cmd) }, now);
+        const job = sched.enqueue(
+          { slot: msg.slot, session: msg.session, cwd: msg.cwd, cmd: redact(msg.cmd), preemptible: msg.preemptible },
+          now,
+        );
         s.data.jobId = job.id;
         sockets.set(job.id, s);
         log(`job ${job.id} queued [${job.slot}] ${job.priority} ${short(job.cmd)}`);
@@ -339,13 +356,18 @@ export async function runDaemon(): Promise<void> {
       case "prioritize": {
         let session = msg.session;
         if (msg.job !== undefined) session = sched.jobs.get(msg.job)?.session;
-        if (!session) {
+        if (!session && !msg.cwd) {
           send(s, { type: "error", message: "no such job or session" });
           break;
         }
-        if (msg.clear) sched.clearPriority(session);
-        else sched.prioritizeSession(session, now);
-        log(`session ${session} ${msg.clear ? "priority cleared" : "prioritized"}`);
+        if (msg.clear) sched.clearPriority(session ?? "", msg.cwd);
+        else {
+          if (session) sched.prioritizeSession(session, now);
+          if (msg.cwd) sched.prioritizeCwd(msg.cwd, now);
+        }
+        log(
+          `${[session && `session ${session}`, msg.cwd && `folder ${msg.cwd}`].filter(Boolean).join(" + ")} ${msg.clear ? "priority cleared" : "prioritized"}`,
+        );
         send(s, {
           type: "ok",
           message: msg.clear ? "priority cleared" : `prioritized for ${policy.priority.minutes} min`,
@@ -454,20 +476,66 @@ export async function runDaemon(): Promise<void> {
   });
   chmodSync(paths.socket, 0o600);
 
+  // An upgrade (brew upgrade, or `bouncer install` of a new version) replaces the binary under a
+  // running daemon. Restart onto it, but only once nothing is running: launchd brings us back.
+  const binaryStamp = () => {
+    try {
+      const st = statSync(paths.binary);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  };
+  const startedStamp = binaryStamp();
+
+  // Installed from Homebrew: ~/.bouncer/bouncer is a copy, so pull `brew upgrade`s in by hand.
+  const source = existsSync(paths.source) ? readFileSync(paths.source, "utf8").trim() : null;
+  const sourceStamp = () => {
+    try {
+      if (!source) return null;
+      const st = statSync(source);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  };
+  const startedSource = sourceStamp();
+
   const sampleLoop = async () => {
     const now = Date.now();
+    const src = startedSource && sourceStamp();
+    if (src && src !== startedSource && sched.active().length === 0 && source) {
+      try {
+        copyFileSync(source, `${paths.binary}.new`);
+        chmodSync(`${paths.binary}.new`, 0o755);
+        renameSync(`${paths.binary}.new`, paths.binary);
+        log("Homebrew upgraded Bouncer; copied the new binary");
+      } catch (e) {
+        log(`could not copy the upgraded binary from ${source}: ${(e as Error).message}`);
+      }
+    }
+    const stamp = startedStamp && binaryStamp();
+    if (stamp && stamp !== startedStamp && sched.active().length === 0) {
+      log("binary was upgraded and nothing is running; restarting onto the new version");
+      // Leave the socket file: clients that see it keep retrying through the restart instead of
+      // failing open. The new daemon replaces it.
+      process.exit(0);
+    }
     try {
       if (existsSync(paths.policy)) {
         const m = statSync(paths.policy).mtimeMs;
         if (m !== policyMtime) {
           policyMtime = m;
           policy = loadPolicy();
+          policyError = null;
           sched.policy = policy;
           log("policy reloaded");
         }
       }
     } catch (e) {
-      log(`policy not reloaded: ${(e as Error).message}`);
+      const message = (e as Error).message;
+      if (message !== policyError) log(`policy not reloaded, keeping the last good one: ${message}`);
+      policyError = message;
     }
 
     try {

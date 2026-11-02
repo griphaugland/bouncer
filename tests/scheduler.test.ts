@@ -179,3 +179,43 @@ describe("probe", () => {
     expect(s.wouldRunNow("node", "a", 1).wouldRun).toBe(true);
   });
 });
+
+describe("priority by project folder", () => {
+  test("prioritizing a folder raises jobs started anywhere inside it, from any session", () => {
+    const s = new Scheduler(policy);
+    s.prioritizeCwd("/code/orbit", 0);
+    const inside = s.enqueue({ slot: "node", session: "codex-pane", cwd: "/code/orbit/web", cmd: "pnpm build" }, 1);
+    const exact = s.enqueue({ slot: "node", session: "x", cwd: "/code/orbit", cmd: "pnpm test" }, 1);
+    const sibling = s.enqueue({ slot: "node", session: "y", cwd: "/code/orbit-billing", cmd: "pnpm test" }, 1);
+    expect([inside.priority, exact.priority, sibling.priority]).toEqual(["high", "high", "normal"]);
+  });
+
+  test("expiry drops folder priority from jobs already queued", () => {
+    const s = new Scheduler({ ...policy, priority: { minutes: 1 } });
+    s.prioritizeCwd("/code/orbit", 0);
+    const j = s.enqueue({ slot: "node", session: "a", cwd: "/code/orbit", cmd: "pnpm test" }, 1);
+    expect(j.priority).toBe("high");
+    s.isPrioritized("other", 61_000);
+    expect(j.priority).toBe("normal");
+  });
+});
+
+describe("jobs that must not be restarted (review #8)", () => {
+  test("are never preempted, even for a prioritized session", () => {
+    const s = new Scheduler(policy);
+    const migration = s.enqueue({ ...job("dotnet", "a", "dotnet ef database update"), preemptible: false }, 0);
+    s.tick(0);
+    s.prioritizeSession("b", 1);
+    s.enqueue(job("dotnet", "b"), 1);
+    expect(s.tick(2).filter((a) => a.type === "preempt")).toEqual([]);
+    expect(migration.state).toBe("running");
+  });
+
+  test("are never reaped when memory is critical", () => {
+    const s = new Scheduler(policy);
+    s.enqueue({ ...job("node", "a", "pnpm install"), preemptible: false }, 0);
+    s.tick(0);
+    s.load = "red";
+    expect(s.tick(60_000)).toEqual([]);
+  });
+});

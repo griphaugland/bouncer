@@ -1,8 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_TOOL_RULES, type ToolRules } from "./classify";
-import { paths } from "./paths";
+import { paths, userHome } from "./paths";
 
 export interface Policy {
   /** Heavy jobs allowed at once across all slots. */
@@ -54,7 +53,7 @@ export const DEFAULT_POLICY: Policy = {
   notifications: true,
   priority: { minutes: 60 },
   tools: DEFAULT_TOOL_RULES,
-  janitor: { roots: [join(homedir(), "Documents")], staleDays: 14, minFreeDiskGb: 40 },
+  janitor: { roots: [join(userHome(), "Documents")], staleDays: 14, minFreeDiskGb: 40 },
 };
 
 function parseTools(raw: unknown): ToolRules {
@@ -74,56 +73,86 @@ function parseTools(raw: unknown): ToolRules {
   return tools;
 }
 
-export const DEFAULT_POLICY_YAML = `# Bouncer policy. The daemon picks up edits within a few seconds.
-#
+const SLOT_NOTES: Record<string, string> = {
+  dotnet: "dotnet build/test/run, incl. the compiler servers they spawn",
+  node: "pnpm/npm/yarn/npx build, test, lint, tsc, install",
+  xcode: "xcodebuild, swift build/test",
+  rust: "cargo",
+  jvm: "gradle, mvn",
+  docker: "docker build",
+};
+
+function toolsYaml(tools: ToolRules): string {
+  const lines: string[] = [];
+  for (const name of Object.keys(DEFAULT_TOOL_RULES)) {
+    if (!tools[name]) lines.push(`  ${name}: false`);
+  }
+  for (const [name, rule] of Object.entries(tools)) {
+    const builtin = DEFAULT_TOOL_RULES[name];
+    if (builtin && JSON.stringify(builtin) === JSON.stringify(rule)) continue;
+    lines.push(
+      `  ${name}: { slot: ${JSON.stringify(rule.slot)}, heavy: [${rule.heavy.map((h) => JSON.stringify(h)).join(", ")}] }`,
+    );
+  }
+  return lines.length
+    ? `tools:\n${lines.join("\n")}`
+    : "# tools:\n#   bazel: { slot: jvm, heavy: [build, test, run] }\n#   docker: false";
+}
+
+/** The policy as commented YAML. `header` lines (e.g. what Mac it was tuned for) go on top. */
+export function renderPolicy(p: Policy, header: string[] = []): string {
+  const pad = (s: string, n: number) => s + " ".repeat(Math.max(1, n - s.length));
+  const slots = Object.entries(p.slots)
+    .map(([name, cap]) => {
+      const line = `  ${name}: ${cap}`;
+      return SLOT_NOTES[name] ? `${pad(line, 14)}# ${SLOT_NOTES[name]}` : line;
+    })
+    .join("\n");
+  return `# Bouncer policy. The daemon picks up edits within a few seconds.
+${header.map((h) => `# ${h}`).join("\n")}${header.length ? "\n" : ""}#
 # Gate is decided by the kernel's memory pressure level and the % of free memory.
 # Swap is shown in \`bouncer status\` but never gates: macOS keeps swap full long
-# after the pressure is gone.
+# after the pressure is gone. Re-tune for this Mac any time: \`bouncer tune\`.
 
 # Heavy jobs allowed at once across all slots.
-maxConcurrent: ${DEFAULT_POLICY.maxConcurrent}
+maxConcurrent: ${p.maxConcurrent}
 
 # Jobs allowed at once per slot.
 slots:
-  dotnet: ${DEFAULT_POLICY.slots.dotnet}   # dotnet build/test/run, incl. the compiler servers they spawn
-  node: ${DEFAULT_POLICY.slots.node}     # pnpm/npm/yarn/npx build, test, lint, tsc, install
-  xcode: ${DEFAULT_POLICY.slots.xcode}    # xcodebuild, swift build/test
-  rust: 1     # cargo
-  go: 1
-  jvm: 1      # gradle, mvn
-  docker: 1   # docker build
+${slots}
 
 gate:
-  yellowFreePercent: ${DEFAULT_POLICY.gate.yellowFreePercent}   # below: one heavy job at a time (or pressure level "warn")
-  redFreePercent: ${DEFAULT_POLICY.gate.redFreePercent}      # below: nothing starts, newest job reaped (or pressure "critical")
+  yellowFreePercent: ${p.gate.yellowFreePercent}   # below: one heavy job at a time (or pressure level "warn")
+  redFreePercent: ${p.gate.redFreePercent}      # below: nothing starts, newest job stopped (or pressure "critical")
 
 reaper:
-  cooldownSeconds: ${DEFAULT_POLICY.reaper.cooldownSeconds}
-  compilerServerIdleSeconds: ${DEFAULT_POLICY.reaper.compilerServerIdleSeconds}
-  stopGraceSeconds: ${DEFAULT_POLICY.reaper.stopGraceSeconds}
-  killCompilerServers: ${DEFAULT_POLICY.reaper.killCompilerServers}   # VBCSCompiler / MSBuild nodes once dotnet is idle
+  cooldownSeconds: ${p.reaper.cooldownSeconds}
+  compilerServerIdleSeconds: ${p.reaper.compilerServerIdleSeconds}
+  stopGraceSeconds: ${p.reaper.stopGraceSeconds}
+  killCompilerServers: ${p.reaper.killCompilerServers}   # VBCSCompiler / MSBuild nodes once dotnet is idle
 
-notifications: ${DEFAULT_POLICY.notifications}
+notifications: ${p.notifications}
 
 # Builds Bouncer didn't start (IDE, sessions from before install) hold slots. Turn off if it
 # mistakes something long-running for a build.
-countOutsideBuilds: ${DEFAULT_POLICY.countOutsideBuilds}
+countOutsideBuilds: ${p.countOutsideBuilds}
 
 priority:
-  minutes: ${DEFAULT_POLICY.priority.minutes}
+  minutes: ${p.priority.minutes}
 
-# Gate more tools. Built in: cargo, go, swift, gradle, mvn, docker (see \`bouncer doctor\`).
+# Gate more tools. Built in: cargo, go, swift, gradle, mvn, docker.
 # Add your own, or set one to false to stop gating it. Run \`bouncer shims\` after editing.
-# tools:
-#   bazel: { slot: jvm, heavy: [build, test, run] }
-#   docker: false
+${toolsYaml(p.tools)}
 
 # \`bouncer clean\`: where to look for worktrees and when one counts as idle.
 janitor:
-  roots: [${DEFAULT_POLICY.janitor.roots.map((r) => `"${r.replace(homedir(), "~")}"`).join(", ")}]
-  staleDays: ${DEFAULT_POLICY.janitor.staleDays}
-  minFreeDiskGb: ${DEFAULT_POLICY.janitor.minFreeDiskGb}   # below: \`bouncer status\` advises cleaning (macOS swaps to this disk)
+  roots: [${p.janitor.roots.map((r) => JSON.stringify(r.replace(userHome(), "~"))).join(", ")}]
+  staleDays: ${p.janitor.staleDays}
+  minFreeDiskGb: ${p.janitor.minFreeDiskGb}   # below: \`bouncer status\` advises cleaning (macOS swaps to this disk)
 `;
+}
+
+export const DEFAULT_POLICY_YAML = renderPolicy(DEFAULT_POLICY);
 
 function positive(value: unknown, fallback: number, name: string): number {
   if (value === undefined) return fallback;
@@ -174,7 +203,7 @@ export function parsePolicy(raw: unknown): Policy {
     tools: parseTools(r.tools),
     janitor: {
       roots: Array.isArray(r.janitor?.roots)
-        ? r.janitor.roots.map((p: unknown) => String(p).replace(/^~(?=\/|$)/, homedir()))
+        ? r.janitor.roots.map((p: unknown) => String(p).replace(/^~(?=\/|$)/, userHome()))
         : d.janitor.roots,
       staleDays: positive(r.janitor?.staleDays, d.janitor.staleDays, "janitor.staleDays"),
       minFreeDiskGb: positive(r.janitor?.minFreeDiskGb, d.janitor.minFreeDiskGb, "janitor.minFreeDiskGb"),

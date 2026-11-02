@@ -148,36 +148,57 @@ export function classifyInvocation(tool: string, args: string[], rules: ToolRule
   }
 }
 
+export interface Segment {
+  /** `NAME=value` assignments that prefix the command. */
+  env: string[];
+  /** The command and its arguments, after wrappers like `env`, `time`, `exec`. */
+  argv: string[];
+}
+
+// Heredoc bodies are data, not commands: `cat > README.md <<EOF … bouncer cancel … EOF` must
+// not look like an invocation.
+const HEREDOC = /<<-?[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g;
+const WRAPPERS = new Set(["env", "time", "command", "exec", "nice", "sudo"]);
+
 /**
- * Best-effort scan of a shell command string (from a Claude Code Bash call) for heavy
- * invocations. Used only to decide whether to move the call to the background; the shim
- * makes the real decision, so a miss here costs a foreground wait, never a crash.
+ * Best-effort split of a shell command string into the commands it runs. Not a shell parser:
+ * good enough to recognise invocations, never used to execute anything.
  */
-export function classifyCommandString(command: string, rules: ToolRules = DEFAULT_TOOL_RULES): string[] {
-  const tools = new Set(shimmedTools(rules));
-  const slots = new Set<string>();
-  for (const rawSegment of command.split(/&&|\|\||[;|\n]/)) {
-    const tokens = rawSegment
+export function commandSegments(command: string): Segment[] {
+  const segments: Segment[] = [];
+  for (const raw of command.replace(HEREDOC, "<<HEREDOC").split(/&&|\|\||[;|\n]/)) {
+    const tokens = raw
       .trim()
       .replace(/^[({\s]+/, "")
       .split(/\s+/)
       .map((t) => t.replace(/^['"]|['"]$/g, ""))
       .filter(Boolean);
+    const env: string[] = [];
     let i = 0;
-    let bypass = false;
     while (i < tokens.length) {
       const t = tokens[i]!;
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
-        if (t.startsWith("BOUNCER_BYPASS=")) bypass = true;
-        i++;
-      } else if (t === "env" || t === "time" || t === "command" || t === "exec" || t === "nice") {
-        i++;
-      } else break;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) env.push(t);
+      else if (!WRAPPERS.has(t)) break;
+      i++;
     }
-    if (bypass || i >= tokens.length) continue;
-    const tool = basename(tokens[i]!);
+    if (i < tokens.length || env.length) segments.push({ env, argv: tokens.slice(i) });
+  }
+  return segments;
+}
+
+/**
+ * Heavy invocations in a shell command string (from a Claude Code Bash call). Used only to
+ * decide whether to move the call to the background; the shim makes the real decision, so a
+ * miss here costs a foreground wait, never a crash.
+ */
+export function classifyCommandString(command: string, rules: ToolRules = DEFAULT_TOOL_RULES): string[] {
+  const tools = new Set(shimmedTools(rules));
+  const slots = new Set<string>();
+  for (const { env, argv } of commandSegments(command)) {
+    if (!argv.length || env.some((e) => e.startsWith("BOUNCER_BYPASS="))) continue;
+    const tool = basename(argv[0]!);
     if (!tools.has(tool)) continue;
-    const slot = classifyInvocation(tool, tokens.slice(i + 1), rules);
+    const slot = classifyInvocation(tool, argv.slice(1), rules);
     if (slot) slots.add(slot);
   }
   return [...slots];

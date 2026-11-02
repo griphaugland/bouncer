@@ -7,6 +7,7 @@ import { paths } from "./paths";
 import { getPlatform, killTree } from "./platform";
 import { loadPolicy } from "./policy";
 import type { ServerMsg } from "./protocol";
+import { err } from "./term";
 
 const STOP_GRACE_MS = 10_000;
 const GATE_CONNECT_MS = 10_000;
@@ -21,7 +22,7 @@ export function safeTools(): ToolRules {
 }
 
 function say(line: string): void {
-  process.stderr.write(`\x1b[2m[bouncer] ${line}\x1b[0m\n`);
+  process.stderr.write(`${err.dim(`[bouncer] ${line}`)}\n`);
 }
 
 /** Who is asking. Claude Code exports its session id into every Bash command it runs. */

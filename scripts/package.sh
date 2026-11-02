@@ -28,8 +28,12 @@ for ARCH in arm64 x64; do
   bun build src/main.ts --compile --target="bun-darwin-$ARCH" \
     --no-compile-autoload-dotenv --no-compile-autoload-bunfig --outfile "$DIR/bouncer"
   if [ -n "$SIGN" ]; then
-    codesign --force --options runtime --timestamp --entitlements scripts/entitlements.plist --sign "$SIGN" "$DIR/bouncer"
+    codesign --force --options runtime --timestamp --entitlements scripts/entitlements.plist \
+      --identifier com.bouncer.cli --sign "$SIGN" "$DIR/bouncer"
     codesign --verify --verbose "$DIR/bouncer"
+  else
+    # Ad-hoc, but with a real identifier instead of Bun's default "a.out".
+    codesign --force --identifier com.bouncer.cli --sign - "$DIR/bouncer"
   fi
   cp LICENSE README.md "$DIR/"
   if [ "$NOTARIZE" = 1 ]; then

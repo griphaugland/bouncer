@@ -5,6 +5,7 @@ import { ask } from "./conn";
 import { paths } from "./paths";
 import { loadPolicy } from "./policy";
 import { resolveReal } from "./run";
+import { mark, out } from "./term";
 
 // Disk cleanup. Two rules keep it safe:
 //  1. Caches are cleared by their own tools (pnpm store prune, npm cache clean, ...), never rm.
@@ -29,6 +30,8 @@ interface Category {
   title: string;
   /** Opt-in categories are skipped by `--apply all`. */
   optIn?: boolean;
+  /** The size shown is an upper bound (pnpm prune frees only unreferenced packages). */
+  upTo?: boolean;
   note?: string;
   scan(): { bytes: number; detail?: string; targets?: string[] } | null;
   apply(targets: string[]): void;
@@ -36,8 +39,8 @@ interface Category {
 
 function duBytes(path: string): number {
   if (!existsSync(path)) return 0;
-  const out = Bun.spawnSync(["/usr/bin/du", "-sk", path], { stdout: "pipe", stderr: "ignore" }).stdout.toString();
-  return (Number(out.split("\t")[0]) || 0) * 1024;
+  const du = Bun.spawnSync(["/usr/bin/du", "-sk", path], { stdout: "pipe", stderr: "ignore" }).stdout.toString();
+  return (Number(du.split("\t")[0]) || 0) * 1024;
 }
 
 function runTool(tool: string, args: string[]): void {
@@ -135,9 +138,7 @@ function porcelain(worktree: string): string[] | null {
   return out.stdout.toString().split("\n").filter(Boolean);
 }
 
-const tty = process.stdout.isTTY;
-const dim = (s: string) => (tty ? `\x1b[2m${s}\x1b[0m` : s);
-const yellow = (s: string) => (tty ? `\x1b[33m${s}\x1b[0m` : s);
+const { dim, yellow, bold } = out;
 
 /** The biggest untracked top-level folder, e.g. a 45 GB `output/` someone forgot. */
 function largestUntracked(worktree: string, lines: string[]): { path: string; bytes: number } | null {
@@ -180,13 +181,9 @@ function categories(staleWorktrees: Worktree[]): Category[] {
     {
       id: "pnpm-store",
       title: "pnpm store, unreferenced packages",
-      scan: () =>
-        resolveReal("pnpm")
-          ? {
-              bytes: duBytes(join(home, "Library/pnpm/store")),
-              detail: "total store size; prune removes only unreferenced",
-            }
-          : null,
+      upTo: true,
+      note: "prune frees only packages no project references",
+      scan: () => (resolveReal("pnpm") ? { bytes: duBytes(join(home, "Library/pnpm/store")) } : null),
       apply: () => runTool("pnpm", ["store", "prune"]),
     },
     {
@@ -247,32 +244,38 @@ export async function cleanCommand(args: string[]): Promise<void> {
   const wanted = args.filter((a) => !a.startsWith("--"));
   const now = Date.now();
 
-  process.stderr.write("scanning worktrees…\n");
+  process.stderr.write(dim("Scanning caches and worktrees…\n"));
   const sessionDirs = await activeSessionDirs();
   const worktrees = findWorktrees(policy.janitor.roots);
   const staleMs = policy.janitor.staleDays * 86_400_000;
   const inUse = (w: Worktree) => sessionDirs.some((d) => d === w.path || d.startsWith(`${w.path}/`));
   const stale = worktrees.filter((w) => now - w.lastActivity >= staleMs && !inUse(w));
 
-  const cats = categories(stale);
   const results: { cat: Category; bytes: number; detail?: string; targets?: string[] }[] = [];
-  for (const cat of cats) {
-    process.stderr.write(`  ${cat.title}…\n`);
+  for (const cat of categories(stale)) {
     try {
       const r = cat.scan();
       if (r) results.push({ cat, ...r });
     } catch (e) {
-      process.stderr.write(`    skipped: ${(e as Error).message}\n`);
+      process.stderr.write(dim(`  ${cat.id} skipped: ${(e as Error).message}\n`));
     }
   }
 
-  console.log("\nCleanable (bouncer clean --apply <id…> | all)\n");
-  for (const r of results) {
-    const tag = r.cat.optIn ? " (opt-in)" : "";
-    console.log(`  ${gb(r.bytes).padStart(8)}  ${r.cat.id.padEnd(22)} ${r.cat.title}${tag}`);
-    for (const line of [r.detail, r.cat.note].filter(Boolean))
-      console.log(`  ${"".padStart(8)}  ${"".padEnd(22)} ${dim(line!)}`);
+  const worth = results.filter((r) => r.bytes >= 1024 ** 2);
+  const empty = results.filter((r) => !worth.includes(r));
+  const sure = worth.filter((r) => !r.cat.upTo && !r.cat.optIn).reduce((s, r) => s + r.bytes, 0);
+  console.log(
+    `\n${bold("Safe to clean")}  ${out.green(gb(sure))}${worth.some((r) => r.cat.upTo || r.cat.optIn) ? dim("  plus the up-to and opt-in items") : ""}`,
+  );
+  for (const r of worth) {
+    const amount = `${r.cat.upTo ? "≤ " : ""}${gb(r.bytes)}`;
+    const tag = r.cat.optIn ? yellow("  opt-in") : "";
+    console.log(`  ${amount.padStart(10)}  ${r.cat.id.padEnd(22)} ${r.cat.title}${tag}`);
+    const detail = [r.detail, r.cat.note].filter(Boolean).join(" · ");
+    if (detail) console.log(`  ${"".padStart(10)}  ${"".padEnd(22)} ${dim(detail)}`);
   }
+  if (!worth.length) console.log(dim("  Nothing worth cleaning."));
+  if (empty.length) console.log(dim(`  already clean: ${empty.map((r) => r.cat.id).join(", ")}`));
 
   // Report-only: whole worktrees. Removing one is a human call (uncommitted work, local files).
   const sized = stale
@@ -280,9 +283,9 @@ export async function cleanCommand(args: string[]): Promise<void> {
     .sort((a, b) => b.bytes - a.bytes)
     .slice(0, 10);
   if (sized.length) {
-    const total = stale.length;
+    const n = stale.length;
     console.log(
-      `\nIdle worktrees (${total} untouched ${policy.janitor.staleDays}d+, largest first). Bouncer never removes these:\n`,
+      `\n${bold("Your call")}  ${dim(`${n} worktree${n === 1 ? "" : "s"} untouched for ${policy.janitor.staleDays}+ days, largest first. Bouncer never removes these.`)}`,
     );
     for (const w of sized) {
       const age = w.lastActivity ? `${Math.round((now - w.lastActivity) / 86_400_000)}d` : "?";
@@ -290,41 +293,38 @@ export async function cleanCommand(args: string[]): Promise<void> {
       const pretty = w.path.replace(homedir(), "~");
       const state =
         lines === null
-          ? yellow("git can't read it (gitdir missing?)")
+          ? yellow("git can't read it")
           : lines.length
             ? yellow(`${lines.length} uncommitted/untracked`)
-            : "clean";
-      console.log(`  ${gb(w.bytes).padStart(8)}  ${age.padStart(4)}  ${pretty}  ${state}`);
+            : out.green("clean");
+      console.log(`  ${gb(w.bytes).padStart(10)}  ${age.padStart(4)}  ${pretty}  ${state}`);
+      const indent = " ".repeat(20);
       const big = lines?.length ? largestUntracked(w.path, lines) : null;
-      if (big)
-        console.log(
-          `  ${"".padStart(14)}${dim(`${gb(big.bytes)} of it is untracked ${big.path} (yours to keep or delete)`)}`,
-        );
+      if (big) console.log(`${indent}${dim(`${gb(big.bytes)} of it is untracked ${big.path}`)}`);
       if (lines === null)
-        console.log(
-          `  ${"".padStart(14)}${dim(`inspect by hand; \`git worktree prune\` in the main repo cleans up dangling entries`)}`,
-        );
-      else if (!lines.length) console.log(`  ${"".padStart(14)}${dim(`git -C ${pretty} worktree remove .`)}`);
+        console.log(`${indent}${dim("gitdir missing? `git worktree prune` in the main repo clears dangling entries")}`);
+      else if (!lines.length) console.log(`${indent}${dim(`git -C ${pretty} worktree remove .`)}`);
     }
   }
 
   if (!apply) {
-    console.log("\nDry run. Nothing was deleted.");
+    console.log(dim("\nDry run, nothing deleted. To clean, name the ids: bouncer clean --apply <id> … (or all)"));
     return;
   }
   const chosen = results.filter((r) => (wanted.includes("all") ? !r.cat.optIn : wanted.includes(r.cat.id)));
   if (!chosen.length) {
-    console.error("\nbouncer: name what to clean, e.g. `bouncer clean --apply pnpm-store npm-cache` or `--apply all`");
+    console.error(
+      `\nbouncer: name what to clean, e.g. ${bold("--apply pnpm-store npm-cache")} or ${bold("--apply all")}`,
+    );
     process.exit(2);
   }
   console.log();
   for (const r of chosen) {
-    process.stdout.write(`cleaning ${r.cat.id}… `);
     try {
       r.cat.apply(r.targets ?? []);
-      console.log("done");
+      console.log(`${mark.ok()} ${r.cat.id}`);
     } catch (e) {
-      console.log(`failed: ${(e as Error).message}`);
+      console.log(`${mark.fail()} ${r.cat.id}  ${dim((e as Error).message)}`);
     }
   }
 }

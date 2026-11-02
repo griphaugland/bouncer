@@ -3,8 +3,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { shimmedTools } from "./classify";
 import { ask } from "./conn";
-import { LAUNCHD_LABEL, paths } from "./paths";
+import { launchdLabel, paths } from "./paths";
 import { loadPolicy } from "./policy";
+import { mark, out } from "./term";
 import { VERSION } from "./version";
 
 // `bouncer doctor`: every way an install can be quietly broken on someone else's machine,
@@ -17,10 +18,7 @@ interface Check {
   fix?: string;
 }
 
-const tty = process.stdout.isTTY;
-const mark: Record<Level, string> = tty
-  ? { ok: "\x1b[32m✓\x1b[0m", warn: "\x1b[33m!\x1b[0m", fail: "\x1b[31m✗\x1b[0m" }
-  : { ok: "ok  ", warn: "warn", fail: "FAIL" };
+const glyph: Record<Level, () => string> = { ok: mark.ok, warn: mark.warn, fail: mark.fail };
 
 function mode(path: string): number {
   return statSync(path).mode & 0o777;
@@ -68,12 +66,12 @@ export async function doctorCommand(): Promise<void> {
   }
 
   // Daemon
-  const launchd = Bun.spawnSync(["/bin/launchctl", "print", `gui/${process.getuid?.()}/${LAUNCHD_LABEL}`], {
+  const launchd = Bun.spawnSync(["/bin/launchctl", "print", `gui/${process.getuid?.()}/${launchdLabel()}`], {
     stdout: "ignore",
     stderr: "ignore",
   });
-  if (launchd.exitCode === 0) add("ok", `launchd job ${LAUNCHD_LABEL} loaded`);
-  else add("fail", `launchd job ${LAUNCHD_LABEL} not loaded`, "run `bouncer install`");
+  if (launchd.exitCode === 0) add("ok", `launchd job ${launchdLabel()} loaded`);
+  else add("fail", `launchd job ${launchdLabel()} not loaded`, "run `bouncer install`");
   const reply = await ask({ op: "status" }, 1500);
   if (reply?.type === "status") {
     const s = reply.status;
@@ -107,10 +105,10 @@ export async function doctorCommand(): Promise<void> {
 
   // PATH, as a new shell sees it
   const marker = "__BOUNCER_DOCTOR__";
-  const out = loginShell(
+  const shellOutput = loginShell(
     `echo "${marker}PATH=$PATH"; for t in ${tools.join(" ")}; do printf "${marker}%s=%s\\n" "$t" "$(command -v $t 2>/dev/null)"; done`,
   );
-  const lines = out
+  const lines = shellOutput
     .split("\n")
     .filter((l) => l.startsWith(marker))
     .map((l) => l.slice(marker.length));
@@ -176,10 +174,16 @@ export async function doctorCommand(): Promise<void> {
   }
 
   for (const c of checks) {
-    console.log(`${mark[c.level]} ${c.title}`);
-    if (c.fix && c.level !== "ok") console.log(`    ${tty ? "\x1b[2m" : ""}fix: ${c.fix}${tty ? "\x1b[0m" : ""}`);
+    console.log(`${glyph[c.level]()} ${c.level === "ok" ? c.title : out.bold(c.title)}`);
+    if (c.fix && c.level !== "ok") console.log(`  ${out.dim(`fix: ${c.fix}`)}`);
   }
   const failed = checks.filter((c) => c.level === "fail").length;
-  console.log(`\nbouncer ${VERSION} · ${failed ? `${failed} problem(s)` : "all good"}`);
+  const warned = checks.filter((c) => c.level === "warn").length;
+  const summary = failed
+    ? out.red(`${failed} problem${failed === 1 ? "" : "s"}`)
+    : warned
+      ? out.yellow(`${warned} warning${warned === 1 ? "" : "s"}`)
+      : out.green("all good");
+  console.log(`\n${out.bold(`bouncer ${VERSION}`)} · ${summary}`);
   if (failed) process.exit(1);
 }

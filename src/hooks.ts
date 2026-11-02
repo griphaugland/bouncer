@@ -1,4 +1,5 @@
-import { classifyCommandString } from "./classify";
+import { basename } from "node:path";
+import { classifyCommandString, commandSegments, type Segment } from "./classify";
 import { ask } from "./conn";
 import { paths } from "./paths";
 import { safeTools } from "./run";
@@ -22,18 +23,36 @@ function emit(output: unknown): void {
  * Commands only the human may run. An agent that bypasses the gate or reorders the queue for
  * itself defeats the point, and agents do reach for whatever makes their own task finish first.
  */
-const HUMAN_ONLY = [
-  { re: /\bBOUNCER_BYPASS=/, what: "skipping the Bouncer queue (BOUNCER_BYPASS)" },
-  { re: /\bbouncer\s+(prioritize|cancel|unschedule|uninstall)\b/, what: "changing Bouncer's queue or install" },
-  { re: /\bbouncer\s+clean\b[^\n;&|]*--apply/, what: "deleting files with bouncer clean --apply" },
-  { re: /\blaunchctl\s+(bootout|unload|kill|disable)\b[^\n]*com\.bouncer/, what: "stopping the Bouncer daemon" },
-];
+// Only actual invocations count (first word of a shell segment, heredoc bodies stripped), so an
+// agent can still write docs or code that merely mention these commands.
+function humanOnly({ env, argv }: Segment): string | null {
+  const bypass = (s: string) => s.startsWith("BOUNCER_BYPASS=");
+  if (env.some(bypass) || (argv[0] === "export" && argv.slice(1).some(bypass))) {
+    return "skipping the Bouncer queue (BOUNCER_BYPASS)";
+  }
+  const [cmd = "", sub = ""] = argv;
+  if (basename(cmd) === "bouncer") {
+    if (["prioritize", "cancel", "unschedule", "uninstall"].includes(sub)) return "changing Bouncer's queue or install";
+    if (sub === "clean" && argv.includes("--apply")) return "deleting files with bouncer clean --apply";
+  }
+  if (
+    basename(cmd) === "launchctl" &&
+    ["bootout", "unload", "kill", "disable", "remove"].includes(sub) &&
+    argv.some((a) => a.includes("com.bouncer"))
+  ) {
+    return "stopping the Bouncer daemon";
+  }
+  return null;
+}
 
 export function humanOnlyReason(command: string): string | null {
-  const hit = HUMAN_ONLY.find((h) => h.re.test(command));
-  return hit
-    ? `Bouncer: ${hit.what} is reserved for the user. Ask them to do it (or to say "prioritize this" if this work is urgent), or run the command normally and let it wait its turn.`
-    : null;
+  for (const segment of commandSegments(command)) {
+    const what = humanOnly(segment);
+    if (what) {
+      return `Bouncer: ${what} is reserved for the user. Ask them to do it (or to say "prioritize this" if this work is urgent), or run the command normally and let it wait its turn.`;
+    }
+  }
+  return null;
 }
 
 /**

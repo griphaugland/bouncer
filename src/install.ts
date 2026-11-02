@@ -11,15 +11,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { shimmedTools } from "./classify";
-import { LAUNCHD_LABEL, paths } from "./paths";
+import { launchdLabel, paths } from "./paths";
 import { DEFAULT_POLICY_YAML, loadPolicy } from "./policy";
+import { mark, out } from "./term";
+import { VERSION } from "./version";
 
 const RC_START = "# >>> bouncer >>>";
 const RC_END = "# <<< bouncer <<<";
 const HOOK_MARK = "bouncer hook";
-const plistPath = join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+const plistPath = () => join(homedir(), "Library", "LaunchAgents", `${launchdLabel()}.plist`);
 
 function stamp(): string {
   return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
@@ -57,7 +59,7 @@ function plist(pathEnv: string): string {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LAUNCHD_LABEL}</string>
+  <key>Label</key><string>${launchdLabel()}</string>
   <key>ProgramArguments</key>
   <array><string>${paths.binary}</string><string>daemon</string></array>
   <key>RunAtLoad</key><true/>
@@ -81,9 +83,9 @@ function launchctl(args: string[]): number {
 
 /** `bootout` returns before the service is gone; a bootstrap issued too early silently fails. */
 function bootoutAndWait(domain: string): void {
-  if (launchctl(["bootout", `${domain}/${LAUNCHD_LABEL}`]) !== 0) return;
+  if (launchctl(["bootout", `${domain}/${launchdLabel()}`]) !== 0) return;
   for (let i = 0; i < 50; i++) {
-    if (launchctl(["print", `${domain}/${LAUNCHD_LABEL}`]) !== 0) return;
+    if (launchctl(["print", `${domain}/${launchdLabel()}`]) !== 0) return;
     Bun.sleepSync(100);
   }
 }
@@ -161,8 +163,27 @@ function editCmuxDock(add: boolean): boolean {
   return true;
 }
 
-function rcFiles(): string[] {
-  return [".zshrc", ".bashrc"].map((f) => join(homedir(), f)).filter((f) => existsSync(f));
+/**
+ * Shell startup files that must carry the PATH line. A fresh macOS account has none, so the
+ * file for the user's login shell is created: zsh reads ~/.zshrc, and bash on macOS runs login
+ * shells, which read ~/.bash_profile (not ~/.bashrc).
+ */
+function rcFiles(create: boolean): string[] {
+  const shell = basename(process.env.SHELL || "/bin/zsh");
+  const wanted = shell === "bash" ? [".bash_profile"] : shell === "zsh" ? [".zshrc"] : [];
+  const files = new Set<string>();
+  for (const f of [".zshrc", ".bash_profile", ".bashrc"]) {
+    const path = join(homedir(), f);
+    if (existsSync(path)) files.add(path);
+  }
+  if (create) {
+    for (const f of wanted) {
+      const path = join(homedir(), f);
+      if (!existsSync(path)) writeFileSync(path, "", { mode: 0o644 });
+      files.add(path);
+    }
+  }
+  return [...files];
 }
 
 function stripBlock(text: string): string {
@@ -210,12 +231,17 @@ export function writeShims(): string[] {
   return tools;
 }
 
+function step(ok: boolean, label: string, detail: string): void {
+  console.log(`${ok ? mark.ok() : mark.fail()} ${label.padEnd(9)} ${out.dim(detail.replace(homedir(), "~"))}`);
+}
+
 export function install(): void {
   // Must run from the compiled binary: that is what gets copied into ~/.bouncer.
   if (/(^|\/)bun$/.test(process.execPath)) {
     console.error("bouncer install must run from the compiled binary: bun run build && ./dist/bouncer install");
     process.exit(1);
   }
+  console.log(out.bold(`Installing Bouncer ${VERSION}\n`));
 
   mkdirSync(paths.home, { recursive: true, mode: 0o700 });
   chmodSync(paths.home, 0o700);
@@ -224,80 +250,92 @@ export function install(): void {
   copyFileSync(process.execPath, tmpBin);
   chmodSync(tmpBin, 0o755);
   renameSync(tmpBin, paths.binary);
-  console.log(`✓ binary      ${paths.binary}`);
+  step(true, "binary", paths.binary);
 
   if (!existsSync(paths.policy)) {
     writeFileSync(paths.policy, DEFAULT_POLICY_YAML, { mode: 0o600 });
-    console.log(`✓ policy      ${paths.policy}`);
-  } else console.log(`· policy      ${paths.policy} (kept)`);
+    step(true, "policy", `${paths.policy} (defaults)`);
+  } else step(true, "policy", `${paths.policy} (kept yours)`);
 
   const tools = writeShims();
-  console.log(`✓ shims       ${tools.join(", ")} (+ bouncer)`);
+  step(true, "shims", tools.join(" "));
 
   const pathEnv = (process.env.PATH ?? "/usr/bin:/bin")
     .split(":")
     .filter((d) => d && d !== paths.shimDir)
     .join(":");
   mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
-  writeFileSync(plistPath, plist(pathEnv));
+  writeFileSync(plistPath(), plist(pathEnv));
   const domain = `gui/${process.getuid?.() ?? 501}`;
   bootoutAndWait(domain);
-  const code = launchctl(["bootstrap", domain, plistPath]);
-  if (code === 0 && waitForSocket(5000))
-    console.log(`✓ daemon      launchd ${LAUNCHD_LABEL}, answering on ${paths.socket}`);
-  else console.log(`✗ daemon      not answering (launchctl bootstrap exited ${code}); see ${paths.log}`);
+  const code = launchctl(["bootstrap", domain, plistPath()]);
+  const daemonUp = code === 0 && waitForSocket(5000);
+  step(
+    daemonUp,
+    "daemon",
+    daemonUp ? `running (launchd ${launchdLabel()})` : `did not start (launchctl exited ${code}), see ${paths.log}`,
+  );
 
   for (const file of settingsFiles()) {
     backup(file);
     editHooks(file, true);
     editStatusLine(file, true);
-    console.log(`✓ hooks       ${file} (+ statusline segment)`);
+    step(true, "claude", `hooks + statusline in ${file}`);
   }
   if (existsSync(cmuxDock)) backup(cmuxDock);
-  if (editCmuxDock(true))
-    console.log(
-      `✓ cmux dock   ${cmuxDock} (seeds new windows; existing Docks: add a terminal running \`bouncer watch\`)`,
-    );
-  for (const file of rcFiles()) {
+  if (editCmuxDock(true)) step(true, "cmux", `Dock control in ${cmuxDock}`);
+  const rcs = rcFiles(true);
+  for (const file of rcs) {
     backup(file);
     editRc(file, true);
-    console.log(`✓ PATH        ${file}`);
+    step(true, "PATH", file);
+  }
+  if (!rcs.length) {
+    step(false, "PATH", `no zsh/bash startup file for ${process.env.SHELL}; add ${paths.shimDir} to PATH yourself`);
   }
 
   console.log(`
-Done. Builds started from NEW shells and NEW agent sessions now go through Bouncer.
-Sessions that were already open keep their old PATH until restarted.
-
-  bouncer status        what's running, what's waiting, and why
-  BOUNCER_BYPASS=1 cmd  skip the gate once
-  bouncer uninstall     remove everything (keeps ~/.bouncer history unless --purge)`);
+${out.bold("Next")}
+  1. Open a new terminal and restart your agent sessions (open ones keep their old PATH).
+  2. ${out.bold("bouncer doctor")}   checks everything is wired up
+  3. ${out.bold("bouncer status")}   what's running, what's waiting, and why
+${out.dim(`
+Skip the queue once: BOUNCER_BYPASS=1 <cmd>   Remove everything: bouncer uninstall`)}`);
+  if (!daemonUp) process.exit(1);
 }
 
 export function uninstall(args: string[]): void {
+  console.log(out.bold("Removing Bouncer\n"));
   bootoutAndWait(`gui/${process.getuid?.() ?? 501}`);
-  rmSync(plistPath, { force: true });
-  console.log("✓ daemon stopped and removed from launchd");
+  rmSync(plistPath(), { force: true });
+  step(true, "daemon", "stopped and removed from launchd");
   for (const file of settingsFiles()) {
     backup(file);
     editHooks(file, false);
     editStatusLine(file, false);
-    console.log(`✓ hooks and statusline segment removed from ${file}`);
+    step(true, "claude", `hooks + statusline removed from ${file}`);
   }
   if (existsSync(cmuxDock)) {
     backup(cmuxDock);
     editCmuxDock(false);
-    console.log(`✓ cmux dock control removed`);
+    step(true, "cmux", "Dock control removed");
   }
-  for (const file of rcFiles()) {
+  for (const file of rcFiles(false)) {
     if (!readFileSync(file, "utf8").includes(RC_START)) continue;
     backup(file);
     editRc(file, false);
-    console.log(`✓ PATH line removed from ${file}`);
+    step(true, "PATH", `line removed from ${file}`);
   }
   rmSync(paths.shimDir, { recursive: true, force: true });
-  console.log("✓ shims removed");
+  step(true, "shims", "removed");
   if (args.includes("--purge")) {
     rmSync(paths.home, { recursive: true, force: true });
-    console.log(`✓ ${paths.home} deleted`);
+    step(true, "data", `${paths.home} deleted`);
+  } else {
+    console.log(
+      out.dim(
+        `\nHistory and policy kept in ${paths.home.replace(homedir(), "~")}. Remove with: bouncer uninstall --purge`,
+      ),
+    );
   }
 }

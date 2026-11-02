@@ -11,7 +11,15 @@ Setup that fits the machine and the agents on it.
 - Priority by project folder: "prioritize this" raises every build in that project, whichever process started it.
 - `install.sh` refuses macOS older than 13 before downloading, and gives the wizard the keyboard under `curl | sh`.
 
-### Fixed
+### Fixed (from an independent review)
+- Editing a symlinked config (stow, chezmoi, yadm) replaced the link with a plain file and could loosen 0600 permissions; links and permissions are now kept.
+- `dotnet run`/`watch`, `dotnet app.dll` and other `run` commands held a slot until stopped; servers are no longer gated (their memory still counts).
+- A broken `policy.yaml` could crash-loop the daemon and leave builds unguarded; it now runs on defaults and reports the error.
+- Agents could skip the queue with any `BOUNCER_*` variable or inside `bash -c '…'`; both are refused now.
+- Uninstall now finds every Claude profile it edited, both Codex instruction files, and still works after `brew uninstall` (`~/.bouncer/bouncer` is a copy that follows Homebrew upgrades).
+- `clean --apply` refuses to run without the daemon, skips git submodules, and protects folders with live work above or inside them.
+- A differently spelled PATH entry could make a shim exec itself forever.
+- Migrations, publishes and installs are never preempted or reaped; "prioritize" now needs "this/it/that…" (a pasted text containing the word triggered it); a job that finished before a preempt landed isn't rerun. `bouncer run --restartable` opts a script in.
 - Tests could edit the real `~/.claude` and `~/.codex`: Bun caches `os.homedir()`, so setting `HOME` in a test didn't isolate it. All home lookups now read `HOME` live, and the test suite runs in a throwaway home it verifies before starting.
 - Backups made within the same second no longer overwrite each other.
 - Terminal wrapper scripts (cmux's) no longer count as installed agents.

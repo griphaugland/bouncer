@@ -1,6 +1,6 @@
 {
   "name": "bouncer",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Process Bouncer: makes heavy builds, tests and agent jobs wait their turn so your machine never runs out of memory.",
   "private": true,
   "type": "module",

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.2] - 2026-11-02
+
+### Fixed
+- Agent sessions started in a terminal opened before `bouncer setup` ran their builds straight past the queue: PATH comes from the terminal, and only new terminals get the shims. On one real Mac that was 25 of 26 sessions. Bouncer's Claude Code and Codex hooks, which every session loads, now send those builds through the queue: in bypass mode the command is rewritten to put the shims first; in other modes the agent is given the exact command to run instead, so your permission prompt stays.
+
 ## [0.5.1] - 2026-11-02
 
 ### Fixed

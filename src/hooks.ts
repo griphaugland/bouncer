@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { classifyCommandString, commandSegments, type Segment } from "./classify";
 import { ask } from "./conn";
@@ -74,6 +75,21 @@ export function hookAgent(args: string[]): HookAgent {
   return args[i + 1] === "codex" ? "codex" : "claude";
 }
 
+/**
+ * The command with Bouncer's shims first on PATH. A session inherits PATH from the terminal it
+ * started in, so one opened before `bouncer setup` runs builds straight past the queue; this is
+ * how the hook, which every session does load, puts those builds back in line.
+ */
+export function throughShims(command: string, shimDir = paths.shimDir): string {
+  const quoted = shimDir.replace(/(["\\$`])/g, "\\$1");
+  return `export PATH="${quoted}:$PATH"; ${command}`;
+}
+
+/** Already gated: the session has the shims on PATH, or the command puts them there itself. */
+function gated(command: string): boolean {
+  return (process.env.PATH ?? "").split(":").includes(paths.shimDir) || command.includes(paths.shimDir);
+}
+
 export async function preToolHook(agent: HookAgent = "claude"): Promise<void> {
   const input = await readStdin();
   if (input?.tool_name !== "Bash") return;
@@ -91,38 +107,50 @@ export async function preToolHook(agent: HookAgent = "claude"): Promise<void> {
     });
     return;
   }
-  // Codex has no background runs: its queued builds simply wait in the foreground (the shim
-  // handles that). Only the guard above applies.
-  if (agent !== "claude" || toolInput.run_in_background) return;
-
-  // Sessions started before `bouncer install` don't have the shims on PATH; nothing would gate.
-  if (!(process.env.PATH ?? "").split(":").includes(paths.shimDir)) return;
 
   const slots = classifyCommandString(toolInput.command, safeTools());
-  if (!slots.length) return;
+  if (!slots.length || !existsSync(paths.shimDir)) return;
+  const old = !gated(toolInput.command);
+  const command = old ? throughShims(toolInput.command) : toolInput.command;
 
-  const reply = await ask({ op: "probe", slots, session: input.session_id ?? "" }, 800);
-  if (reply?.type !== "probe" || reply.wouldRun) return;
+  // Would it have to wait? Only Claude Code can move a call to the background; a Codex build
+  // just waits in the foreground inside the shim.
+  let busy: string | null = null;
+  if (agent === "claude" && !toolInput.run_in_background) {
+    const reply = await ask({ op: "probe", slots, session: input.session_id ?? "" }, 800);
+    if (reply?.type === "probe" && !reply.wouldRun) busy = reply.reason;
+  }
+  if (!old && !busy) return;
 
-  const reason = `Bouncer: ${reply.reason}. Queued; running in the background, you will be notified when it finishes.`;
-  if (input.permission_mode === "bypassPermissions") {
+  const why = old ? "this session started before Bouncer was installed, so its builds would skip the queue" : "";
+  if (agent === "claude" && input.permission_mode === "bypassPermissions") {
     emit({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "allow",
-        permissionDecisionReason: reason,
-        updatedInput: { ...toolInput, run_in_background: true },
+        permissionDecisionReason: busy
+          ? `Bouncer: ${busy}. Queued; running in the background, you will be notified when it finishes.`
+          : `Bouncer: ${why}; running it through the queue.`,
+        updatedInput: { ...toolInput, command, ...(busy ? { run_in_background: true } : {}) },
       },
     });
     return;
   }
-  // "allow" would also skip the permission prompt the user expects in other modes, so there
-  // we tell the agent to resubmit in the background instead of rewriting the call ourselves.
+  // "allow" would also skip the permission prompt the user expects in other modes, so there the
+  // agent resubmits the call itself and it gets the usual prompt.
+  // The command goes last, on its own line, so nothing (not even a full stop) gets copied with it.
+  const problem = [why, busy ? `the machine is busy (${busy})` : ""].filter(Boolean).join("; ");
+  const background = busy
+    ? " with run_in_background: true; it will wait its turn and you will be notified when it finishes"
+    : "";
+  const reason = old
+    ? `Bouncer: ${problem}. Run this exact command instead${background}:\n${command}`
+    : `Bouncer: ${problem}. Run this exact command again${background}.`;
   emit({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
-      permissionDecisionReason: `Bouncer: the machine is busy (${reply.reason}). Run this exact command again with run_in_background: true; it will wait its turn and you will be notified when it finishes.`,
+      permissionDecisionReason: reason,
     },
   });
 }

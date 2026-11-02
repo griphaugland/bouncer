@@ -7,6 +7,8 @@ import type { Subprocess } from "bun";
 // Real daemon, real clients, isolated BOUNCER_HOME. Nothing touches ~/.bouncer, no notifications,
 // no compiler servers killed, load pinned to green.
 
+import { throughShims } from "../src/hooks";
+
 const MAIN = join(import.meta.dir, "..", "src", "main.ts");
 // The test daemon reads the real process table: real builds on this machine must not fill its
 // slots (found when a real `dotnet test` elsewhere made the dotnet-slot test wait forever).
@@ -179,6 +181,76 @@ describe("daemon + clients", () => {
     expect(decision.permissionDecision).toBe("allow");
     expect(decision.updatedInput).toEqual({ command: "dotnet test", description: "tests", run_in_background: true });
     a.kill();
+  });
+
+  // Sessions whose terminal opened before `bouncer setup` lack the shims on PATH; the hook, which
+  // every session loads, puts their builds back in the queue.
+  describe("a session that started before Bouncer", () => {
+    const hook = async (command: string, mode: string, agent: string[] = []) => {
+      mkdirSync(join(home, "bin"), { recursive: true });
+      const input = JSON.stringify({
+        session_id: "old",
+        tool_name: "Bash",
+        permission_mode: mode,
+        tool_input: { command },
+      });
+      const r = await output(["hook", "pre-tool", ...agent], { PATH: process.env.PATH ?? "" }, input);
+      return r.out ? JSON.parse(r.out).hookSpecificOutput : null;
+    };
+    const prefixed = (cmd: string) => `export PATH="${join(home, "bin")}:$PATH"; ${cmd}`;
+
+    test("bypass mode: the build is rewritten to go through the shims", async () => {
+      const d = await hook("dotnet build", "bypassPermissions");
+      expect(d.permissionDecision).toBe("allow");
+      expect(d.updatedInput).toEqual({ command: prefixed("dotnet build") });
+    });
+
+    test("bypass mode and busy: through the shims and in the background", async () => {
+      const a = bouncer(["run", "--slot", "dotnet", "--", "sleep", "5"]);
+      await waitFor(async () => (await status()).running.length === 1);
+      const d = await hook("dotnet build", "bypassPermissions");
+      expect(d.updatedInput).toEqual({ command: prefixed("dotnet build"), run_in_background: true });
+      a.kill();
+    });
+
+    test("other modes: refused once with the exact command, keeping the permission prompt", async () => {
+      const d = await hook("dotnet build", "default");
+      expect(d.permissionDecision).toBe("deny");
+      // Last, on its own line: an agent copying "this exact command" must not pick up a full stop.
+      expect(d.permissionDecisionReason.endsWith(`\n${prefixed("dotnet build")}`)).toBe(true);
+      expect(d.updatedInput).toBeUndefined();
+    });
+
+    test("the rerun with the prefix passes: no loop", async () => {
+      expect(await hook(prefixed("dotnet build"), "default")).toBeNull();
+    });
+
+    test("Codex: refused with the exact command", async () => {
+      const d = await hook("pnpm test", "default", ["--agent", "codex"]);
+      expect(d.permissionDecision).toBe("deny");
+      expect(d.permissionDecisionReason).toContain(prefixed("pnpm test"));
+    });
+
+    test("light commands are left alone", async () => {
+      expect(await hook("git status", "bypassPermissions")).toBeNull();
+      expect(await hook("dotnet --version", "default")).toBeNull();
+    });
+
+    test("the prefix really puts the shims first, even for a folder with spaces and $", () => {
+      const r = Bun.spawnSync(["sh", "-c", throughShims('printf %s "$PATH"', "/tmp/a b/$x")], { stdout: "pipe" });
+      expect(r.stdout.toString().startsWith("/tmp/a b/$x:")).toBe(true);
+    });
+  });
+
+  test("no hook rewrites on a Mac where Bouncer isn't installed", async () => {
+    rmSync(join(home, "bin"), { recursive: true, force: true });
+    const input = JSON.stringify({
+      session_id: "s",
+      tool_name: "Bash",
+      permission_mode: "bypassPermissions",
+      tool_input: { command: "dotnet build" },
+    });
+    expect((await output(["hook", "pre-tool"], { PATH: process.env.PATH ?? "" }, input)).out).toBe("");
   });
 
   test("redacts secrets before they reach status and the log", async () => {

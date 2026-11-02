@@ -1,8 +1,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { ask } from "./conn";
-import { paths } from "./paths";
+import { paths, userHome } from "./paths";
 import { loadPolicy } from "./policy";
 import { resolveReal } from "./run";
 import { mark, out } from "./term";
@@ -159,7 +158,7 @@ async function activeSessionDirs(): Promise<string[]> {
 }
 
 function categories(staleWorktrees: Worktree[]): Category[] {
-  const home = homedir();
+  const home = userHome();
   const derived = join(home, "Library/Developer/Xcode/DerivedData");
   return [
     {
@@ -290,7 +289,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
     for (const w of sized) {
       const age = w.lastActivity ? `${Math.round((now - w.lastActivity) / 86_400_000)}d` : "?";
       const lines = porcelain(w.path);
-      const pretty = w.path.replace(homedir(), "~");
+      const pretty = w.path.replace(userHome(), "~");
       const state =
         lines === null
           ? yellow("git can't read it")

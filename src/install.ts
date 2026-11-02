@@ -10,10 +10,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { shimmedTools } from "./classify";
-import { launchdLabel, paths } from "./paths";
+import { launchdLabel, paths, userHome } from "./paths";
 import { DEFAULT_POLICY_YAML, loadPolicy } from "./policy";
 import { mark, out } from "./term";
 import { VERSION } from "./version";
@@ -21,7 +20,7 @@ import { VERSION } from "./version";
 const RC_START = "# >>> bouncer >>>";
 const RC_END = "# <<< bouncer <<<";
 const HOOK_MARK = "bouncer hook";
-const plistPath = () => join(homedir(), "Library", "LaunchAgents", `${launchdLabel()}.plist`);
+const plistPath = () => join(userHome(), "Library", "LaunchAgents", `${launchdLabel()}.plist`);
 
 function stamp(): string {
   return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
@@ -68,7 +67,7 @@ function plist(pathEnv: string): string {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>${pathEnv}</string>
-    <key>HOME</key><string>${homedir()}</string>
+    <key>HOME</key><string>${userHome()}</string>
   </dict>
   <key>StandardOutPath</key><string>${paths.home}/daemon.stdout.log</string>
   <key>StandardErrorPath</key><string>${paths.home}/daemon.stdout.log</string>
@@ -100,7 +99,7 @@ function waitForSocket(ms: number): boolean {
 
 /** Claude Code settings files to wire hooks into: the default profile plus CLAUDE_CONFIG_DIR. */
 function settingsFiles(): string[] {
-  const files = new Set([join(homedir(), ".claude", "settings.json")]);
+  const files = new Set([join(userHome(), ".claude", "settings.json")]);
   if (process.env.CLAUDE_CONFIG_DIR) files.add(join(process.env.CLAUDE_CONFIG_DIR, "settings.json"));
   return [...files].filter((f) => existsSync(f));
 }
@@ -150,11 +149,11 @@ function editStatusLine(file: string, add: boolean): void {
   writeAtomic(file, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
-const cmuxDock = join(homedir(), ".config", "cmux", "dock.json");
+const cmuxDock = join(userHome(), ".config", "cmux", "dock.json");
 const DOCK_ID = "bouncer";
 
 function editCmuxDock(add: boolean): boolean {
-  if (!existsSync(join(homedir(), ".config", "cmux"))) return false;
+  if (!existsSync(join(userHome(), ".config", "cmux"))) return false;
   const config = existsSync(cmuxDock) ? JSON.parse(readFileSync(cmuxDock, "utf8")) : { controls: [] };
   config.controls = (config.controls ?? []).filter((c: { id?: string }) => c.id !== DOCK_ID);
   if (add) config.controls.push({ id: DOCK_ID, title: "Bouncer", command: `"${paths.binary}" watch`, height: 420 });
@@ -173,12 +172,12 @@ function rcFiles(create: boolean): string[] {
   const wanted = shell === "bash" ? [".bash_profile"] : shell === "zsh" ? [".zshrc"] : [];
   const files = new Set<string>();
   for (const f of [".zshrc", ".bash_profile", ".bashrc"]) {
-    const path = join(homedir(), f);
+    const path = join(userHome(), f);
     if (existsSync(path)) files.add(path);
   }
   if (create) {
     for (const f of wanted) {
-      const path = join(homedir(), f);
+      const path = join(userHome(), f);
       if (!existsSync(path)) writeFileSync(path, "", { mode: 0o644 });
       files.add(path);
     }
@@ -243,7 +242,7 @@ export function homebrewStablePath(execPath: string): string | null {
 }
 
 function step(ok: boolean, label: string, detail: string): void {
-  console.log(`${ok ? mark.ok() : mark.fail()} ${label.padEnd(9)} ${out.dim(detail.replace(homedir(), "~"))}`);
+  console.log(`${ok ? mark.ok() : mark.fail()} ${label.padEnd(9)} ${out.dim(detail.replace(userHome(), "~"))}`);
 }
 
 export function install(): void {
@@ -285,7 +284,7 @@ export function install(): void {
     .split(":")
     .filter((d) => d && d !== paths.shimDir)
     .join(":");
-  mkdirSync(join(homedir(), "Library", "LaunchAgents"), { recursive: true });
+  mkdirSync(join(userHome(), "Library", "LaunchAgents"), { recursive: true });
   writeFileSync(plistPath(), plist(pathEnv));
   const domain = `gui/${process.getuid?.() ?? 501}`;
   bootoutAndWait(domain);
@@ -355,7 +354,7 @@ export function uninstall(args: string[]): void {
   } else {
     console.log(
       out.dim(
-        `\nHistory and policy kept in ${paths.home.replace(homedir(), "~")}. Remove with: bouncer uninstall --purge`,
+        `\nHistory and policy kept in ${paths.home.replace(userHome(), "~")}. Remove with: bouncer uninstall --purge`,
       ),
     );
   }

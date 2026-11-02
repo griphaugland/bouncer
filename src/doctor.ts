@@ -1,9 +1,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { shimmedTools } from "./classify";
 import { ask } from "./conn";
-import { launchdLabel, paths } from "./paths";
+import { launchdLabel, paths, userHome } from "./paths";
 import { loadPolicy } from "./policy";
 import { mark, out } from "./term";
 import { VERSION } from "./version";
@@ -30,7 +29,7 @@ function loginShell(script: string): string {
   const r = Bun.spawnSync([shell, "-ilc", script], {
     stdout: "pipe",
     stderr: "ignore",
-    env: { HOME: homedir(), TERM: "dumb" },
+    env: { HOME: userHome(), TERM: "dumb" },
   });
   return r.stdout.toString();
 }
@@ -140,7 +139,7 @@ export async function doctorCommand(): Promise<void> {
   }
 
   // Claude Code hooks
-  const settingsFiles = [join(homedir(), ".claude", "settings.json")];
+  const settingsFiles = [join(userHome(), ".claude", "settings.json")];
   if (process.env.CLAUDE_CONFIG_DIR) settingsFiles.push(join(process.env.CLAUDE_CONFIG_DIR, "settings.json"));
   const seen = new Set<string>();
   for (const file of settingsFiles) {
@@ -151,8 +150,8 @@ export async function doctorCommand(): Promise<void> {
       const settings = JSON.parse(text);
       const hasPre = JSON.stringify(settings.hooks?.PreToolUse ?? []).includes("bouncer hook pre-tool");
       const hasPrompt = JSON.stringify(settings.hooks?.UserPromptSubmit ?? []).includes("bouncer hook prompt");
-      if (hasPre && hasPrompt) add("ok", `Claude Code hooks in ${file.replace(homedir(), "~")}`);
-      else add("warn", `Claude Code hooks missing in ${file.replace(homedir(), "~")}`, "run `bouncer install`");
+      if (hasPre && hasPrompt) add("ok", `Claude Code hooks in ${file.replace(userHome(), "~")}`);
+      else add("warn", `Claude Code hooks missing in ${file.replace(userHome(), "~")}`, "run `bouncer install`");
     } catch {
       add("warn", `could not parse ${file}`);
     }

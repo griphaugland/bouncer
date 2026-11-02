@@ -1,5 +1,5 @@
 import { basename } from "node:path";
-import { classifyInvocation } from "./classify";
+import { classifyInvocation, DEFAULT_TOOL_RULES, type ToolRules } from "./classify";
 import { descendants, isCompilerServer, type Proc } from "./platform";
 
 // Pure readings of a process snapshot. The daemon decides what to do with them.
@@ -22,11 +22,12 @@ const NODE_HEAVY_SCRIPT =
 const WATCHING = /\s(--watch|-w|watch|dev|serve|start)(\s|$)/;
 
 /** Which slot a running process occupies, judged from its command line alone. */
-export function heavySlotOfProcess(command: string): string | null {
+export function heavySlotOfProcess(command: string, rules: ToolRules = DEFAULT_TOOL_RULES): string | null {
   if (isCompilerServer(command)) return null;
   const [exe = "", ...args] = command.split(/\s+/);
   const name = basename(exe);
   if (name === "dotnet" || name === "xcodebuild") return classifyInvocation(name, args);
+  if (rules[name]) return classifyInvocation(name, args, rules);
   if (name === "node") {
     const script = args.find((a) => !a.startsWith("-"));
     const tool = script ? NODE_SCRIPT_TOOL[basename(script)] : undefined;
@@ -59,14 +60,18 @@ function ancestors(byPid: Map<number, Proc>, p: Proc): Proc[] {
  * BOUNCER_BYPASS run. Only the root of each build tree counts, and anything under a Bouncer
  * process (a gated job) is excluded, so a tracked job is never counted twice.
  */
-export function externalJobs(procs: Proc[], isBouncer: (command: string) => boolean): ExternalJob[] {
+export function externalJobs(
+  procs: Proc[],
+  isBouncer: (command: string) => boolean,
+  rules: ToolRules = DEFAULT_TOOL_RULES,
+): ExternalJob[] {
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const out: ExternalJob[] = [];
   for (const p of procs) {
-    const slot = heavySlotOfProcess(p.command);
+    const slot = heavySlotOfProcess(p.command, rules);
     if (!slot) continue;
     const up = ancestors(byPid, p);
-    if (up.some((a) => isBouncer(a.command) || heavySlotOfProcess(a.command))) continue;
+    if (up.some((a) => isBouncer(a.command) || heavySlotOfProcess(a.command, rules))) continue;
     const rssKb = p.rssKb + descendants(procs, p.pid).reduce((s, d) => s + d.rssKb, 0);
     out.push({ pid: p.pid, slot, command: p.command, rssMb: Math.round(rssKb / 1024), elapsedSec: p.elapsedSec });
   }

@@ -61,6 +61,8 @@ export interface JobView {
 }
 
 export interface StatusSnapshot {
+  /** Daemon build version; the CLI warns when it differs from its own. */
+  version: string;
   pid: number;
   startedAt: number;
   load: Load;

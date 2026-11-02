@@ -52,3 +52,30 @@ describe("classifyCommandString", () => {
     expect(classifyCommandString("dotnet --info | head")).toEqual([]);
   });
 });
+
+describe("generic tools", () => {
+  test.each([
+    ["cargo", ["build", "--release"], "rust"],
+    ["cargo", ["test"], "rust"],
+    ["cargo", ["--version"], null],
+    ["cargo", ["fmt"], null],
+    ["go", ["test", "./..."], "go"],
+    ["go", ["mod", "tidy"], null],
+    ["swift", ["build", "-c", "release"], "xcode"],
+    ["gradle", ["build"], "jvm"],
+    ["mvn", ["-q", "package"], "jvm"],
+    ["docker", ["build", "-t", "x", "."], "docker"],
+    ["docker", ["compose", "build"], "docker"],
+    ["docker", ["compose", "up"], null],
+    ["docker", ["ps"], null],
+  ] as const)("%s %j -> %s", (tool, args, slot) => {
+    expect(classifyInvocation(tool, [...args])).toBe(slot);
+  });
+
+  test("custom rules from policy apply, including in command strings", () => {
+    const rules = { bazel: { slot: "jvm", heavy: ["build", "test"] } };
+    expect(classifyInvocation("bazel", ["test", "//..."], rules)).toBe("jvm");
+    expect(classifyCommandString("cd x && bazel build //app", rules)).toEqual(["jvm"]);
+    expect(classifyCommandString("cargo build", rules)).toEqual([]);
+  });
+});

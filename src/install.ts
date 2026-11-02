@@ -3,6 +3,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -11,9 +12,9 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { SHIMMED_TOOLS } from "./classify";
+import { shimmedTools } from "./classify";
 import { LAUNCHD_LABEL, paths } from "./paths";
-import { DEFAULT_POLICY_YAML } from "./policy";
+import { DEFAULT_POLICY_YAML, loadPolicy } from "./policy";
 
 const RC_START = "# >>> bouncer >>>";
 const RC_END = "# <<< bouncer <<<";
@@ -67,8 +68,8 @@ function plist(pathEnv: string): string {
     <key>PATH</key><string>${pathEnv}</string>
     <key>HOME</key><string>${homedir()}</string>
   </dict>
-  <key>StandardOutPath</key><string>${paths.log}</string>
-  <key>StandardErrorPath</key><string>${paths.log}</string>
+  <key>StandardOutPath</key><string>${paths.home}/daemon.stdout.log</string>
+  <key>StandardErrorPath</key><string>${paths.home}/daemon.stdout.log</string>
 </dict>
 </plist>
 `;
@@ -180,6 +181,33 @@ function editRc(file: string, add: boolean): void {
   writeAtomic(file, text);
 }
 
+/**
+ * (Re)write one shim per gated tool, from the current policy, and remove shims for tools that
+ * are no longer gated. Returns the tools shimmed.
+ */
+export function writeShims(): string[] {
+  mkdirSync(paths.shimDir, { recursive: true });
+  let tools: string[];
+  try {
+    tools = shimmedTools(loadPolicy().tools);
+  } catch (e) {
+    console.error(`bouncer: policy.yaml is invalid (${(e as Error).message}); using the default tools`);
+    tools = shimmedTools();
+  }
+  for (const existing of readdirSync(paths.shimDir)) {
+    if (existing !== "bouncer" && !tools.includes(existing)) rmSync(join(paths.shimDir, existing), { force: true });
+  }
+  for (const tool of tools) {
+    const file = join(paths.shimDir, tool);
+    writeFileSync(file, shimScript(tool));
+    chmodSync(file, 0o755);
+  }
+  // The shim dir is on PATH anyway, so `bouncer` itself lives there too.
+  rmSync(join(paths.shimDir, "bouncer"), { force: true });
+  symlinkSync(paths.binary, join(paths.shimDir, "bouncer"));
+  return tools;
+}
+
 export function install(): void {
   // Must run from the compiled binary: that is what gets copied into ~/.bouncer.
   if (/(^|\/)bun$/.test(process.execPath)) {
@@ -187,6 +215,8 @@ export function install(): void {
     process.exit(1);
   }
 
+  mkdirSync(paths.home, { recursive: true, mode: 0o700 });
+  chmodSync(paths.home, 0o700);
   mkdirSync(paths.shimDir, { recursive: true });
   const tmpBin = `${paths.binary}.new`;
   copyFileSync(process.execPath, tmpBin);
@@ -195,19 +225,12 @@ export function install(): void {
   console.log(`✓ binary      ${paths.binary}`);
 
   if (!existsSync(paths.policy)) {
-    writeFileSync(paths.policy, DEFAULT_POLICY_YAML);
+    writeFileSync(paths.policy, DEFAULT_POLICY_YAML, { mode: 0o600 });
     console.log(`✓ policy      ${paths.policy}`);
   } else console.log(`· policy      ${paths.policy} (kept)`);
 
-  for (const tool of SHIMMED_TOOLS) {
-    const file = join(paths.shimDir, tool);
-    writeFileSync(file, shimScript(tool));
-    chmodSync(file, 0o755);
-  }
-  // The shim dir is on PATH anyway, so `bouncer` itself lives there too.
-  rmSync(join(paths.shimDir, "bouncer"), { force: true });
-  symlinkSync(paths.binary, join(paths.shimDir, "bouncer"));
-  console.log(`✓ shims       ${SHIMMED_TOOLS.join(", ")} (+ bouncer)`);
+  const tools = writeShims();
+  console.log(`✓ shims       ${tools.join(", ")} (+ bouncer)`);
 
   const pathEnv = (process.env.PATH ?? "/usr/bin:/bin")
     .split(":")

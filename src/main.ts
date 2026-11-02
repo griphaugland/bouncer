@@ -9,12 +9,14 @@ import {
   watchCommand,
 } from "./cli";
 import { runDaemon } from "./daemon";
+import { doctorCommand } from "./doctor";
 import { preToolHook, promptHook } from "./hooks";
-import { install, uninstall } from "./install";
+import { install, uninstall, writeShims } from "./install";
 import { cleanCommand } from "./janitor";
 import { gatedRun, resolveReal, runCommand } from "./run";
+import { VERSION } from "./version";
 
-const HELP = `bouncer: makes heavy builds and tests wait their turn so your machine never runs out of memory.
+const HELP = `bouncer ${VERSION}: makes heavy builds and tests wait their turn so your machine never runs out of memory.
 
   bouncer status [--json|--line|--segment]  load, slots, jobs, sessions, advice
   bouncer watch                      live status (cmux Dock pane)
@@ -28,6 +30,8 @@ const HELP = `bouncer: makes heavy builds and tests wait their turn so your mach
   bouncer unschedule <s-id>          drop a pending scheduled job
   bouncer clean [--apply <id…>|all]  find disk space; dry run unless --apply
   bouncer install | uninstall        set up / remove daemon, shims and Claude Code hooks
+  bouncer doctor                     check the install, PATH, hooks and daemon; prints fixes
+  bouncer shims                      regenerate shims after editing tools: in policy.yaml
   bouncer daemon                     run the daemon in the foreground
 
 Internal: bouncer shim <tool> [args]   bouncer hook pre-tool|prompt`;
@@ -86,11 +90,22 @@ switch (cmd) {
   case "clean":
     await cleanCommand(args);
     break;
+  case "doctor":
+    await doctorCommand();
+    break;
+  case "shims":
+    console.log(`shims: ${writeShims().join(", ")}`);
+    break;
   case "install":
     install();
     break;
   case "uninstall":
     uninstall(args);
+    break;
+  case "version":
+  case "--version":
+  case "-v":
+    console.log(VERSION);
     break;
   case undefined:
   case "help":

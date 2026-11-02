@@ -90,6 +90,16 @@ export class Store {
       .run(state, fields.startedAt ?? null, fields.endedAt ?? null, fields.exitCode ?? null, id);
   }
 
+  /** Drop finished history older than `before`. Returns the number of rows removed. */
+  prune(before: number): number {
+    this.ensureScheduled();
+    const jobs = this.db.query("DELETE FROM jobs WHERE COALESCE(ended_at, queued_at) < ?").run(before).changes;
+    const sched = this.db
+      .query("DELETE FROM scheduled WHERE state IN ('done','failed','cancelled') AND COALESCE(ended_at, created_at) < ?")
+      .run(before).changes;
+    return jobs + sched;
+  }
+
   maxId(): number {
     const row = this.db.query("SELECT MAX(id) AS id FROM jobs").get() as { id: number | null };
     return row.id ?? 0;

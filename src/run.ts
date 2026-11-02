@@ -1,13 +1,23 @@
 import { accessSync, constants } from "node:fs";
 import { basename, delimiter, join } from "node:path";
 import { constants as osConstants } from "node:os";
-import { classifyInvocation } from "./classify";
+import { classifyInvocation, DEFAULT_TOOL_RULES, type ToolRules } from "./classify";
+import { loadPolicy } from "./policy";
 import { Conn } from "./conn";
 import { paths } from "./paths";
 import { getPlatform, killTree } from "./platform";
 import type { ServerMsg } from "./protocol";
 
 const STOP_GRACE_MS = 10_000;
+
+/** Tool rules from the policy; a broken policy file must never stop a build, so fall back. */
+export function safeTools(): ToolRules {
+  try {
+    return loadPolicy().tools;
+  } catch {
+    return DEFAULT_TOOL_RULES;
+  }
+}
 
 function say(line: string): void {
   process.stderr.write(`\x1b[2m[bouncer] ${line}\x1b[0m\n`);
@@ -81,7 +91,7 @@ export async function gatedRun(opts: { tool: string; real: string; args: string[
   const { real, args } = opts;
   if (process.env.BOUNCER_JOB || process.env.BOUNCER_BYPASS) return passthrough(real, args);
 
-  const slot = opts.slot ?? classifyInvocation(opts.tool, args);
+  const slot = opts.slot ?? classifyInvocation(opts.tool, args, safeTools());
   if (!slot) return passthrough(real, args);
 
   const conn = await Conn.open(1000);
@@ -198,5 +208,5 @@ export async function runCommand(argv: string[]): Promise<never> {
     process.exit(127);
   }
   const tool = basename(cmd);
-  return gatedRun({ tool, real, args, slot: slot ?? classifyInvocation(tool, args) ?? "misc" });
+  return gatedRun({ tool, real, args, slot: slot ?? classifyInvocation(tool, args, safeTools()) ?? "misc" });
 }

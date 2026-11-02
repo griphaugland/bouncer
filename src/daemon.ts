@@ -1,4 +1,14 @@
-import { closeSync, existsSync, mkdirSync, openSync, statSync, unlinkSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
 import { basename, join } from "node:path";
 import type { Socket } from "bun";
 import { Conn } from "./conn";
@@ -15,6 +25,8 @@ import {
   type StatusSnapshot,
 } from "./protocol";
 import { advise, agentSessions, type ExternalJob, externalJobs } from "./observe";
+import { redact } from "./redact";
+import { VERSION } from "./version";
 import { isDue } from "./schedule";
 import { type Action, type Job, Scheduler } from "./scheduler";
 import { Store } from "./store";
@@ -38,11 +50,38 @@ const IDLE_WINDOW_SEC = 60;
 const isBouncerProcess = (command: string) =>
   command.startsWith(paths.binary) || /\/(\.bouncer|dist)\/bouncer\s+(shim|run)\b/.test(command);
 
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+const HISTORY_DAYS = 30;
+
+/** Appends to daemon.log, rotating to daemon.log.1 at 5 MB so the log can never fill the disk. */
 function log(line: string): void {
-  console.log(`${new Date().toISOString()} ${line}`);
+  const entry = `${new Date().toISOString()} ${line}\n`;
+  try {
+    if (existsSync(paths.log) && statSync(paths.log).size > LOG_MAX_BYTES) renameSync(paths.log, `${paths.log}.1`);
+    appendFileSync(paths.log, entry, { mode: 0o600 });
+  } catch {
+    process.stdout.write(entry);
+  }
 }
 
+/**
+ * Everything under ~/.bouncer is owner-only. The socket accepts commands that run as this user
+ * (scheduled jobs), and logs hold command lines, so no other local account may read or connect.
+ */
+function lockDown(): void {
+  mkdirSync(paths.home, { recursive: true, mode: 0o700 });
+  chmodSync(paths.home, 0o700);
+  for (const f of [paths.db, paths.log, `${paths.log}.1`, paths.policy]) {
+    if (existsSync(f)) chmodSync(f, 0o600);
+  }
+  if (existsSync(paths.jobLogs)) chmodSync(paths.jobLogs, 0o700);
+}
+
+// Integration tests pin the load so they don't depend on how busy the test machine is.
+const LOAD_OVERRIDE = process.env.BOUNCER_LOAD_OVERRIDE as Load | undefined;
+
 export function classifyLoad(sample: LoadSample, policy: Policy): Load {
+  if (LOAD_OVERRIDE === "green" || LOAD_OVERRIDE === "yellow" || LOAD_OVERRIDE === "red") return LOAD_OVERRIDE;
   if (sample.pressureLevel >= 4 || sample.freePercent < policy.gate.redFreePercent) return "red";
   if (sample.pressureLevel >= 2 || sample.freePercent < policy.gate.yellowFreePercent) return "yellow";
   return "green";
@@ -53,7 +92,7 @@ function short(cmd: string, n = 60): string {
 }
 
 export async function runDaemon(): Promise<void> {
-  mkdirSync(paths.home, { recursive: true });
+  lockDown();
 
   if (existsSync(paths.socket)) {
     const existing = await Conn.open(500);
@@ -67,6 +106,9 @@ export async function runDaemon(): Promise<void> {
 
   const platform = getPlatform();
   const store = new Store(paths.db);
+  chmodSync(paths.db, 0o600);
+  const pruned = store.prune(Date.now() - HISTORY_DAYS * 86_400_000);
+  if (pruned) log(`pruned ${pruned} history rows older than ${HISTORY_DAYS} days`);
   let policy = loadPolicy();
   let policyMtime = existsSync(paths.policy) ? statSync(paths.policy).mtimeMs : 0;
   const sched = new Scheduler(policy, store.maxId() + 1);
@@ -99,7 +141,7 @@ export async function runDaemon(): Promise<void> {
   };
 
   const notify = (message: string) => {
-    if (Date.now() - lastNotify < NOTIFY_COOLDOWN_MS) return;
+    if (!policy.notifications || Date.now() - lastNotify < NOTIFY_COOLDOWN_MS) return;
     lastNotify = Date.now();
     platform.notify("Bouncer", message);
   };
@@ -167,6 +209,7 @@ export async function runDaemon(): Promise<void> {
     const running = sched.running();
     const slotNames = new Set([...Object.keys(policy.slots), ...running.map((j) => j.slot)]);
     return {
+      version: VERSION,
       pid: process.pid,
       startedAt,
       load: sched.load,
@@ -193,14 +236,14 @@ export async function runDaemon(): Promise<void> {
   };
 
   const observe = (now: number) => {
-    external = externalJobs(procs, isBouncerProcess);
+    external = externalJobs(procs, isBouncerProcess, policy.tools).map((e) => ({ ...e, command: redact(e.command) }));
     const counts = new Map<string, number>();
     for (const e of external) counts.set(e.slot, (counts.get(e.slot) ?? 0) + 1);
     sched.external = counts;
     for (const e of external) {
       if (reportedExternal.has(e.pid)) continue;
       reportedExternal.add(e.pid);
-      log(`outside Bouncer: pid=${e.pid} [${e.slot}] ${short(e.command, 80)}`);
+      log(`outside Bouncer: pid=${e.pid} [${e.slot}] ${short(redact(e.command), 80)}`);
     }
     const livePids = new Set(procs.map((p) => p.pid));
     for (const pid of reportedExternal) if (!livePids.has(pid)) reportedExternal.delete(pid);
@@ -260,7 +303,7 @@ export async function runDaemon(): Promise<void> {
     const now = Date.now();
     switch (msg.op) {
       case "admit": {
-        const job = sched.enqueue({ slot: msg.slot, session: msg.session, cwd: msg.cwd, cmd: msg.cmd }, now);
+        const job = sched.enqueue({ slot: msg.slot, session: msg.session, cwd: msg.cwd, cmd: redact(msg.cmd) }, now);
         s.data.jobId = job.id;
         sockets.set(job.id, s);
         log(`job ${job.id} queued [${job.slot}] ${job.priority} ${short(job.cmd)}`);
@@ -325,7 +368,7 @@ export async function runDaemon(): Promise<void> {
           send(s, { type: "error", message: "nothing to schedule" });
           break;
         }
-        mkdirSync(paths.jobLogs, { recursive: true });
+        mkdirSync(paths.jobLogs, { recursive: true, mode: 0o700 });
         const rec = store.addScheduled({
           argv: msg.argv,
           cwd: msg.cwd,
@@ -336,7 +379,7 @@ export async function runDaemon(): Promise<void> {
           createdAt: now,
           logPath: join(paths.jobLogs, `scheduled-${now}-${Math.random().toString(36).slice(2, 8)}.log`),
         });
-        log(`scheduled s${rec.id} at=${rec.at ? new Date(rec.at).toISOString() : "-"} idle=${rec.whenIdle} ${short(rec.argv.join(" "))}`);
+        log(`scheduled s${rec.id} at=${rec.at ? new Date(rec.at).toISOString() : "-"} idle=${rec.whenIdle} ${short(redact(rec.argv.join(" ")))}`);
         send(s, { type: "ok", message: `s${rec.id}` });
         break;
       }
@@ -344,7 +387,9 @@ export async function runDaemon(): Promise<void> {
         const states: ScheduledRecord["state"][] = msg.all
           ? ["pending", "running", "done", "failed", "cancelled"]
           : ["pending", "running"];
-        send(s, { type: "scheduled", items: store.scheduled(states).map(({ env: _env, ...rest }) => rest) });
+        // Stored argv is what runs; what leaves the daemon is redacted.
+        const items = store.scheduled(states).map(({ env: _env, argv, ...rest }) => ({ ...rest, argv: [redact(argv.join(" "))] }));
+        send(s, { type: "scheduled", items });
         break;
       }
       case "unschedule": {
@@ -395,6 +440,7 @@ export async function runDaemon(): Promise<void> {
       },
     },
   });
+  chmodSync(paths.socket, 0o600);
 
   const sampleLoop = async () => {
     const now = Date.now();
@@ -475,7 +521,7 @@ export async function runDaemon(): Promise<void> {
       if (launched.has(rec.id) || !isDue(rec, { now, idle })) continue;
       launched.add(rec.id);
       store.setScheduledState(rec.id, "running", { startedAt: now });
-      log(`scheduled s${rec.id} starting: ${short(rec.argv.join(" "))}`);
+      log(`scheduled s${rec.id} starting: ${short(redact(rec.argv.join(" ")))}`);
       let proc: ReturnType<typeof Bun.spawn>;
       let fd: number | undefined;
       try {
@@ -499,7 +545,7 @@ export async function runDaemon(): Promise<void> {
         const state = code === 0 ? "done" : "failed";
         store.setScheduledState(rec.id, state, { endedAt: Date.now(), exitCode: code });
         log(`scheduled s${rec.id} ${state} exit=${code}`);
-        platform.notify("Bouncer", `Scheduled s${rec.id} ${code === 0 ? "finished" : `failed (exit ${code})`}: ${short(rec.argv.join(" "), 50)}`);
+        if (policy.notifications) platform.notify("Bouncer", `Scheduled s${rec.id} ${code === 0 ? "finished" : `failed (exit ${code})`}: ${short(redact(rec.argv.join(" ")), 50)}`);
       });
       // Idle-gated jobs go one at a time: the first one makes the machine busy anyway.
       if (rec.whenIdle) break;
@@ -526,7 +572,7 @@ export async function runDaemon(): Promise<void> {
   };
 
   const reapCompilerServers = async (now: number) => {
-    if (dotnetIdleSince === null) return;
+    if (!policy.reaper.killCompilerServers || dotnetIdleSince === null) return;
     const idleFor = now - dotnetIdleSince;
     if (idleFor < policy.reaper.compilerServerIdleSeconds * 1000 && sched.load !== "red") return;
     for (const p of compilerServers(procs)) {
@@ -560,7 +606,7 @@ export async function runDaemon(): Promise<void> {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
-  log(`daemon started pid=${process.pid} load=${sched.load} pressure=${sample.pressureLevel} free=${sample.freePercent}%`);
+  log(`daemon v${VERSION} started pid=${process.pid} load=${sched.load} pressure=${sample.pressureLevel} free=${sample.freePercent}%`);
 }
 
 function appName(command: string): string {

@@ -1,6 +1,7 @@
 import { classifyCommandString } from "./classify";
 import { ask } from "./conn";
 import { paths } from "./paths";
+import { safeTools } from "./run";
 
 // The verb only ("prioritize this"), not the noun ("what's the priority here"). Norwegian too.
 const PRIORITIZE = /\b(prioriti[sz]e|prioriter)\b/i;
@@ -33,7 +34,7 @@ export async function preToolHook(): Promise<void> {
   // Sessions started before `bouncer install` don't have the shims on PATH; nothing would gate.
   if (!(process.env.PATH ?? "").split(":").includes(paths.shimDir)) return;
 
-  const slots = classifyCommandString(toolInput.command);
+  const slots = classifyCommandString(toolInput.command, safeTools());
   if (!slots.length) return;
 
   const reply = await ask({ op: "probe", slots, session: input.session_id ?? "" }, 800);

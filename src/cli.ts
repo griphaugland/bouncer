@@ -2,6 +2,7 @@ import { ask } from "./conn";
 import type { JobView, Load, StatusSnapshot } from "./protocol";
 import { sessionId } from "./run";
 import { nextClockTime, parseDelay, pickEnv } from "./schedule";
+import { VERSION } from "./version";
 
 const tty = process.stdout.isTTY;
 const c = (code: string, s: string) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
@@ -33,6 +34,11 @@ function notRunning(): never {
 async function fetchStatus(): Promise<StatusSnapshot> {
   const reply = await ask({ op: "status" });
   if (reply?.type !== "status") notRunning();
+  if (reply.status.version !== VERSION) {
+    process.stderr.write(
+      `bouncer: the running daemon is v${reply.status.version ?? "?"} but this CLI is v${VERSION}. Run \`bouncer install\` to restart it.\n`,
+    );
+  }
   return reply.status;
 }
 

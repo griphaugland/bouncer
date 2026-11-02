@@ -1,9 +1,44 @@
 import { basename } from "node:path";
 
-// Tools that get a PATH shim. `bun` is deliberately absent: Bouncer itself is built with it,
-// and gating its own build would be a footgun.
-export const SHIMMED_TOOLS = ["dotnet", "pnpm", "npm", "npx", "yarn", "xcodebuild"] as const;
-export type ShimmedTool = (typeof SHIMMED_TOOLS)[number];
+// Tools with hand-written rules below. `bun` is deliberately absent: Bouncer itself is built
+// with it, and gating its own build would be a footgun.
+export const BUILTIN_TOOLS = ["dotnet", "pnpm", "npm", "npx", "yarn", "xcodebuild"] as const;
+
+/**
+ * Generic tools: a subcommand list per tool, configurable under `tools:` in policy.yaml.
+ * An entry may be several words ("compose build") and matches the leading positional args.
+ */
+export interface ToolRule {
+  slot: string;
+  heavy: string[];
+}
+export type ToolRules = Record<string, ToolRule>;
+
+export const DEFAULT_TOOL_RULES: ToolRules = {
+  cargo: { slot: "rust", heavy: ["build", "b", "test", "t", "run", "r", "check", "c", "clippy", "bench", "install", "doc"] },
+  go: { slot: "go", heavy: ["build", "test", "run", "install", "vet", "generate"] },
+  swift: { slot: "xcode", heavy: ["build", "test", "run"] },
+  gradle: { slot: "jvm", heavy: ["build", "test", "assemble", "check", "bootRun", "run"] },
+  mvn: { slot: "jvm", heavy: ["compile", "test", "package", "verify", "install", "spring-boot:run"] },
+  docker: { slot: "docker", heavy: ["build", "buildx build", "compose build"] },
+};
+
+/** Every tool that gets a shim: the built-ins plus whatever the policy defines. */
+export function shimmedTools(rules: ToolRules = DEFAULT_TOOL_RULES): string[] {
+  return [...new Set([...BUILTIN_TOOLS, ...Object.keys(rules)])];
+}
+
+const LIGHT_FLAGS = new Set(["--version", "-V", "--help", "-h", "help", "version"]);
+
+function classifyGeneric(rule: ToolRule, args: string[]): string | null {
+  if (args.some((a) => LIGHT_FLAGS.has(a))) return null;
+  const pos = args.filter((a) => !a.startsWith("-"));
+  for (const entry of rule.heavy) {
+    const words = entry.split(/\s+/);
+    if (words.every((w, i) => pos[i] === w)) return rule.slot;
+  }
+  return null;
+}
 
 const DOTNET_HEAVY = new Set([
   "build", "test", "run", "publish", "pack", "watch", "restore", "msbuild", "clean", "vstest", "format", "ef",
@@ -49,7 +84,7 @@ function classifyJsName(name: string | undefined, rest: string[], args: string[]
 }
 
 /** Which slot an invocation of a shimmed tool needs, or null if it is light and runs ungated. */
-export function classifyInvocation(tool: string, args: string[]): string | null {
+export function classifyInvocation(tool: string, args: string[], rules: ToolRules = DEFAULT_TOOL_RULES): string | null {
   switch (tool) {
     case "dotnet": {
       const first = args.find((a) => !a.startsWith("-"));
@@ -73,8 +108,10 @@ export function classifyInvocation(tool: string, args: string[]): string | null 
       if (JS_SCRIPT_RUNNERS.has(sub)) return classifyJsName(pos[1], pos.slice(2), args);
       return classifyJsName(sub, pos.slice(1), args);
     }
-    default:
-      return null;
+    default: {
+      const rule = rules[tool];
+      return rule ? classifyGeneric(rule, args) : null;
+    }
   }
 }
 
@@ -83,7 +120,8 @@ export function classifyInvocation(tool: string, args: string[]): string | null 
  * invocations. Used only to decide whether to move the call to the background; the shim
  * makes the real decision, so a miss here costs a foreground wait, never a crash.
  */
-export function classifyCommandString(command: string): string[] {
+export function classifyCommandString(command: string, rules: ToolRules = DEFAULT_TOOL_RULES): string[] {
+  const tools = new Set(shimmedTools(rules));
   const slots = new Set<string>();
   for (const rawSegment of command.split(/&&|\|\||[;|\n]/)) {
     const tokens = rawSegment
@@ -105,8 +143,8 @@ export function classifyCommandString(command: string): string[] {
     }
     if (bypass || i >= tokens.length) continue;
     const tool = basename(tokens[i]!);
-    if (!(SHIMMED_TOOLS as readonly string[]).includes(tool)) continue;
-    const slot = classifyInvocation(tool, tokens.slice(i + 1));
+    if (!tools.has(tool)) continue;
+    const slot = classifyInvocation(tool, tokens.slice(i + 1), rules);
     if (slot) slots.add(slot);
   }
   return [...slots];

@@ -1,0 +1,158 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Subprocess } from "bun";
+
+// Real daemon, real clients, isolated BOUNCER_HOME. Nothing touches ~/.bouncer, no notifications,
+// no compiler servers killed, load pinned to green.
+
+const MAIN = join(import.meta.dir, "..", "src", "main.ts");
+let home: string;
+let daemon: Subprocess | undefined;
+let env: Record<string, string>;
+
+function bouncer(args: string[], extra: Record<string, string> = {}) {
+  return Bun.spawn([process.execPath, MAIN, ...args], { env: { ...env, ...extra }, stdout: "pipe", stderr: "pipe" });
+}
+
+async function output(args: string[], extra: Record<string, string> = {}, stdin?: string) {
+  const p = Bun.spawn([process.execPath, MAIN, ...args], {
+    env: { ...env, ...extra },
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
+  });
+  const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+  return { code: await p.exited, out, err };
+}
+
+async function waitFor(fn: () => boolean | Promise<boolean>, ms = 8000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (await fn()) return;
+    await Bun.sleep(50);
+  }
+  throw new Error("timed out");
+}
+
+async function status() {
+  return JSON.parse((await output(["status", "--json"])).out);
+}
+
+beforeEach(async () => {
+  home = mkdtempSync(join(tmpdir(), "bouncer-it-"));
+  writeFileSync(
+    join(home, "policy.yaml"),
+    "maxConcurrent: 4\nslots:\n  t: 1\nnotifications: false\nreaper:\n  killCompilerServers: false\njanitor:\n  roots: []\n",
+  );
+  env = { ...(process.env as Record<string, string>), BOUNCER_HOME: home, BOUNCER_LOAD_OVERRIDE: "green" };
+  delete env.BOUNCER_JOB;
+  delete env.BOUNCER_BYPASS;
+  daemon = bouncer(["daemon"]);
+  await waitFor(() => existsSync(join(home, "bouncer.sock")));
+});
+
+afterEach(async () => {
+  daemon?.kill();
+  await daemon?.exited;
+  rmSync(home, { recursive: true, force: true });
+});
+
+describe("daemon + clients", () => {
+  test("a capacity-1 slot runs jobs one after the other", async () => {
+    const log = join(home, "order.log");
+    const job = (name: string) =>
+      bouncer(["run", "--slot", "t", "--", "sh", "-c", `echo ${name}-start >> ${log}; sleep 0.6; echo ${name}-end >> ${log}`], {
+        BOUNCER_SESSION: name,
+      });
+    const a = job("a");
+    await waitFor(() => existsSync(log));
+    const b = job("b");
+    await Promise.all([a.exited, b.exited]);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["a-start", "a-end", "b-start", "b-end"]);
+  });
+
+  test("a prioritized session preempts a running job, which reruns afterwards", async () => {
+    const log = join(home, "preempt.log");
+    const a = bouncer(["run", "--slot", "t", "--", "sh", "-c", `echo a-start >> ${log}; sleep 3; echo a-end >> ${log}`], {
+      BOUNCER_SESSION: "slow",
+    });
+    await waitFor(() => existsSync(log));
+    expect((await output(["prioritize", "urgent"])).code).toBe(0);
+    const b = bouncer(["run", "--slot", "t", "--", "sh", "-c", `echo b-ran >> ${log}`], { BOUNCER_SESSION: "urgent" });
+    expect(await b.exited).toBe(0);
+    expect(await a.exited).toBe(0);
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["a-start", "b-ran", "a-start", "a-end"]);
+  }, 15_000);
+
+  test("a client that dies releases its slot", async () => {
+    const a = bouncer(["run", "--slot", "t", "--", "sleep", "30"]);
+    await waitFor(async () => (await status()).running.length === 1);
+    a.kill("SIGKILL");
+    const b = await output(["run", "--slot", "t", "--", "echo", "after"]);
+    expect(b.out.trim()).toBe("after");
+  });
+
+  test("cancel stops a queued job before it starts", async () => {
+    const a = bouncer(["run", "--slot", "t", "--", "sleep", "5"]);
+    await waitFor(async () => (await status()).running.length === 1);
+    const b = bouncer(["run", "--slot", "t", "--", "echo", "never"]);
+    await waitFor(async () => (await status()).queued.length === 1);
+    const id = (await status()).queued[0].id;
+    expect((await output(["cancel", String(id)])).code).toBe(0);
+    expect(await b.exited).toBe(130);
+    expect(await new Response(b.stdout).text()).toBe("");
+    a.kill();
+  });
+
+  test("the Claude Code hook backgrounds a command that would queue", async () => {
+    const shims = join(home, "bin");
+    mkdirSync(shims, { recursive: true });
+    const a = bouncer(["run", "--slot", "dotnet", "--", "sleep", "5"]);
+    writeFileSync(join(home, "policy.yaml"), "slots:\n  dotnet: 1\nnotifications: false\nreaper:\n  killCompilerServers: false\n");
+    await waitFor(async () => (await status()).running.length === 1);
+    const input = JSON.stringify({
+      session_id: "s1",
+      tool_name: "Bash",
+      permission_mode: "bypassPermissions",
+      tool_input: { command: "dotnet test", description: "tests" },
+    });
+    const r = await output(["hook", "pre-tool"], { PATH: `${shims}:${process.env.PATH}` }, input);
+    const decision = JSON.parse(r.out).hookSpecificOutput;
+    expect(decision.permissionDecision).toBe("allow");
+    expect(decision.updatedInput).toEqual({ command: "dotnet test", description: "tests", run_in_background: true });
+    a.kill();
+  });
+
+  test("redacts secrets before they reach status and the log", async () => {
+    const a = bouncer(["run", "--slot", "t", "--", "sh", "-c", "GITHUB_TOKEN=ghp_abcdefghijklmnop sleep 2"]);
+    await waitFor(async () => (await status()).running.length === 1);
+    const s = await status();
+    expect(s.running[0].cmd).toContain("GITHUB_TOKEN=***");
+    expect(readFileSync(join(home, "daemon.log"), "utf8")).not.toContain("ghp_abcdefghijklmnop");
+    a.kill();
+  });
+
+  test("a scheduled job runs, logs its output, and records its exit code", async () => {
+    expect((await output(["schedule", "--in", "1s", "--", "sh", "-c", "echo scheduled-ran; exit 4"])).code).toBe(0);
+    await waitFor(async () => (await output(["scheduled", "--all"])).out.includes("failed"), 10_000);
+    const logs = join(home, "logs");
+    const file = readdirSync(logs)[0]!;
+    expect(readFileSync(join(logs, file), "utf8")).toContain("scheduled-ran");
+    expect((await output(["scheduled", "--all"])).out).toContain("exit 4");
+  }, 15_000);
+});
+
+test("with no daemon, builds fail open and still run", async () => {
+  const lonely = mkdtempSync(join(tmpdir(), "bouncer-none-"));
+  const p = Bun.spawn([process.execPath, MAIN, "run", "--slot", "t", "--", "echo", "ran"], {
+    env: { ...(process.env as Record<string, string>), BOUNCER_HOME: lonely },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(await p.exited).toBe(0);
+  expect((await new Response(p.stdout).text()).trim()).toBe("ran");
+  expect(await new Response(p.stderr).text()).toContain("running unguarded");
+  rmSync(lonely, { recursive: true, force: true });
+});

@@ -13,7 +13,12 @@ test.each([
 ])("%s", (input, expected) => expect(redact(input)).toBe(expected));
 
 test("leaves ordinary commands alone", () => {
-  for (const cmd of ["dotnet test --filter Foo", "pnpm --filter web build", "LANG=en_US.UTF-8 npx vitest run", "KEYBOARD=dk make"]) {
+  for (const cmd of [
+    "dotnet test --filter Foo",
+    "pnpm --filter web build",
+    "LANG=en_US.UTF-8 npx vitest run",
+    "KEYBOARD=dk make",
+  ]) {
     expect(redact(cmd)).toBe(cmd);
   }
 });

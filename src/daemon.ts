@@ -12,6 +12,8 @@ import {
 import { basename, join } from "node:path";
 import type { Socket } from "bun";
 import { Conn } from "./conn";
+import { takeLines } from "./lines";
+import { advise, agentSessions, type ExternalJob, externalJobs } from "./observe";
 import { paths } from "./paths";
 import { compilerServers, descendants, getPlatform, killTree, type LoadSample, type Proc } from "./platform";
 import { loadPolicy, type Policy } from "./policy";
@@ -24,12 +26,11 @@ import {
   type ServerMsg,
   type StatusSnapshot,
 } from "./protocol";
-import { advise, agentSessions, type ExternalJob, externalJobs } from "./observe";
 import { redact } from "./redact";
-import { VERSION } from "./version";
 import { isDue } from "./schedule";
 import { type Action, type Job, Scheduler } from "./scheduler";
 import { Store } from "./store";
+import { VERSION } from "./version";
 
 interface SockData {
   buf: string;
@@ -153,7 +154,9 @@ export async function runDaemon(): Promise<void> {
     lastSent.delete(done.id);
     store.save(done);
     const secs = done.startedAt ? Math.round((done.endedAt! - done.startedAt) / 1000) : 0;
-    log(`job ${done.id} ${done.state} exit=${exitCode ?? "-"} ${secs}s peak=${Math.round(done.peakRssMb)}MB ${short(done.cmd)}`);
+    log(
+      `job ${done.id} ${done.state} exit=${exitCode ?? "-"} ${secs}s peak=${Math.round(done.peakRssMb)}MB ${short(done.cmd)}`,
+    );
   };
 
   const dispatch = (actions: Action[]) => {
@@ -164,7 +167,9 @@ export async function runDaemon(): Promise<void> {
         continue;
       }
       if (a.type === "run") {
-        log(`job ${a.job.id} run [${a.job.slot}] ${a.job.priority} waited=${Math.round((Date.now() - a.job.queuedAt) / 1000)}s`);
+        log(
+          `job ${a.job.id} run [${a.job.slot}] ${a.job.priority} waited=${Math.round((Date.now() - a.job.queuedAt) / 1000)}s`,
+        );
         send(s, { type: "run", job: a.job.id });
       } else if (a.type === "preempt") {
         log(`job ${a.job.id} preempted for job ${a.by.id}`);
@@ -239,7 +244,7 @@ export async function runDaemon(): Promise<void> {
     external = externalJobs(procs, isBouncerProcess, policy.tools).map((e) => ({ ...e, command: redact(e.command) }));
     const counts = new Map<string, number>();
     for (const e of external) counts.set(e.slot, (counts.get(e.slot) ?? 0) + 1);
-    sched.external = counts;
+    sched.external = policy.countOutsideBuilds ? counts : new Map();
     for (const e of external) {
       if (reportedExternal.has(e.pid)) continue;
       reportedExternal.add(e.pid);
@@ -341,7 +346,10 @@ export async function runDaemon(): Promise<void> {
         if (msg.clear) sched.clearPriority(session);
         else sched.prioritizeSession(session, now);
         log(`session ${session} ${msg.clear ? "priority cleared" : "prioritized"}`);
-        send(s, { type: "ok", message: msg.clear ? "priority cleared" : `prioritized for ${policy.priority.minutes} min` });
+        send(s, {
+          type: "ok",
+          message: msg.clear ? "priority cleared" : `prioritized for ${policy.priority.minutes} min`,
+        });
         schedule();
         break;
       }
@@ -379,7 +387,9 @@ export async function runDaemon(): Promise<void> {
           createdAt: now,
           logPath: join(paths.jobLogs, `scheduled-${now}-${Math.random().toString(36).slice(2, 8)}.log`),
         });
-        log(`scheduled s${rec.id} at=${rec.at ? new Date(rec.at).toISOString() : "-"} idle=${rec.whenIdle} ${short(redact(rec.argv.join(" ")))}`);
+        log(
+          `scheduled s${rec.id} at=${rec.at ? new Date(rec.at).toISOString() : "-"} idle=${rec.whenIdle} ${short(redact(rec.argv.join(" ")))}`,
+        );
         send(s, { type: "ok", message: `s${rec.id}` });
         break;
       }
@@ -388,14 +398,19 @@ export async function runDaemon(): Promise<void> {
           ? ["pending", "running", "done", "failed", "cancelled"]
           : ["pending", "running"];
         // Stored argv is what runs; what leaves the daemon is redacted.
-        const items = store.scheduled(states).map(({ env: _env, argv, ...rest }) => ({ ...rest, argv: [redact(argv.join(" "))] }));
+        const items = store
+          .scheduled(states)
+          .map(({ env: _env, argv, ...rest }) => ({ ...rest, argv: [redact(argv.join(" "))] }));
         send(s, { type: "scheduled", items });
         break;
       }
       case "unschedule": {
         const rec = store.scheduled(["pending"]).find((r) => r.id === msg.id);
         if (!rec) {
-          send(s, { type: "error", message: `no pending scheduled job s${msg.id} (running ones: bouncer cancel <job>)` });
+          send(s, {
+            type: "error",
+            message: `no pending scheduled job s${msg.id} (running ones: bouncer cancel <job>)`,
+          });
           break;
         }
         store.setScheduledState(rec.id, "cancelled", { endedAt: now });
@@ -413,12 +428,9 @@ export async function runDaemon(): Promise<void> {
         s.data = { buf: "", decoder: new TextDecoder() };
       },
       data(s, chunk) {
-        s.data.buf += s.data.decoder.decode(chunk, { stream: true });
-        let nl: number;
-        while ((nl = s.data.buf.indexOf("\n")) >= 0) {
-          const line = s.data.buf.slice(0, nl);
-          s.data.buf = s.data.buf.slice(nl + 1);
-          if (!line.trim()) continue;
+        const { lines, rest } = takeLines(s.data.buf + s.data.decoder.decode(chunk, { stream: true }));
+        s.data.buf = rest;
+        for (const line of lines) {
           try {
             handle(s, JSON.parse(line));
           } catch (e) {
@@ -545,7 +557,11 @@ export async function runDaemon(): Promise<void> {
         const state = code === 0 ? "done" : "failed";
         store.setScheduledState(rec.id, state, { endedAt: Date.now(), exitCode: code });
         log(`scheduled s${rec.id} ${state} exit=${code}`);
-        if (policy.notifications) platform.notify("Bouncer", `Scheduled s${rec.id} ${code === 0 ? "finished" : `failed (exit ${code})`}: ${short(redact(rec.argv.join(" ")), 50)}`);
+        if (policy.notifications)
+          platform.notify(
+            "Bouncer",
+            `Scheduled s${rec.id} ${code === 0 ? "finished" : `failed (exit ${code})`}: ${short(redact(rec.argv.join(" ")), 50)}`,
+          );
       });
       // Idle-gated jobs go one at a time: the first one makes the machine busy anyway.
       if (rec.whenIdle) break;
@@ -586,10 +602,14 @@ export async function runDaemon(): Promise<void> {
   const tickSample = async () => {
     if (sampling) return;
     sampling = true;
+    const started = performance.now();
     try {
       await sampleLoop();
     } finally {
       sampling = false;
+      // The loop shares a thread with the socket; a slow pass delays every client. Surface it.
+      const ms = Math.round(performance.now() - started);
+      if (ms > 500) log(`slow sample: ${ms} ms`);
     }
   };
   // Sample immediately so the first `bouncer status` already shows memory users.
@@ -606,7 +626,9 @@ export async function runDaemon(): Promise<void> {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
-  log(`daemon v${VERSION} started pid=${process.pid} load=${sched.load} pressure=${sample.pressureLevel} free=${sample.freePercent}%`);
+  log(
+    `daemon v${VERSION} started pid=${process.pid} load=${sched.load} pressure=${sample.pressureLevel} free=${sample.freePercent}%`,
+  );
 }
 
 function appName(command: string): string {

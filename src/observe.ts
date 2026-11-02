@@ -146,7 +146,9 @@ export function advise(input: AdviceInput): string[] {
     );
   }
   if (input.compilerServerMb > 500) {
-    out.push(`dotnet compiler servers hold ${Math.round(input.compilerServerMb)} MB; Bouncer stops them once dotnet goes idle.`);
+    out.push(
+      `dotnet compiler servers hold ${Math.round(input.compilerServerMb)} MB; Bouncer stops them once dotnet goes idle.`,
+    );
   }
   if (input.diskFreeGb < input.minFreeDiskGb) {
     out.push(
@@ -155,7 +157,10 @@ export function advise(input: AdviceInput): string[] {
   }
   if (input.freePercent < 25 && !idle.length) {
     const top = [...input.sessions].sort((a, b) => b.rssMb - a.rssMb)[0];
-    if (top) out.push(`Memory is tight. The largest session is pid ${top.pid} (${top.rssMb} MB${top.cwd ? `, ${top.cwd}` : ""}).`);
+    if (top)
+      out.push(
+        `Memory is tight. The largest session is pid ${top.pid} (${top.rssMb} MB${top.cwd ? `, ${top.cwd}` : ""}).`,
+      );
   }
   return out;
 }

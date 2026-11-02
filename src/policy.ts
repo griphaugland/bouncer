@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { DEFAULT_TOOL_RULES, type ToolRules } from "./classify";
 import { join } from "node:path";
+import { DEFAULT_TOOL_RULES, type ToolRules } from "./classify";
 import { paths } from "./paths";
 
 export interface Policy {
@@ -25,6 +25,8 @@ export interface Policy {
     /** Kill idle dotnet compiler servers (VBCSCompiler, MSBuild nodes). */
     killCompilerServers: boolean;
   };
+  /** Let heavy builds Bouncer didn't start (IDE, old sessions) occupy slots. */
+  countOutsideBuilds: boolean;
   /** macOS notifications for memory-critical, out-of-memory events and finished scheduled jobs. */
   notifications: boolean;
   priority: {
@@ -48,6 +50,7 @@ export const DEFAULT_POLICY: Policy = {
   slots: { dotnet: 1, node: 2, xcode: 1, rust: 1, go: 1, jvm: 1, docker: 1 },
   gate: { yellowFreePercent: 25, redFreePercent: 12 },
   reaper: { cooldownSeconds: 30, compilerServerIdleSeconds: 30, stopGraceSeconds: 10, killCompilerServers: true },
+  countOutsideBuilds: true,
   notifications: true,
   priority: { minutes: 60 },
   tools: DEFAULT_TOOL_RULES,
@@ -102,6 +105,10 @@ reaper:
 
 notifications: ${DEFAULT_POLICY.notifications}
 
+# Builds Bouncer didn't start (IDE, sessions from before install) hold slots. Turn off if it
+# mistakes something long-running for a build.
+countOutsideBuilds: ${DEFAULT_POLICY.countOutsideBuilds}
+
 priority:
   minutes: ${DEFAULT_POLICY.priority.minutes}
 
@@ -128,7 +135,8 @@ function positive(value: unknown, fallback: number, name: string): number {
 
 function bool(value: unknown, fallback: boolean, name: string): boolean {
   if (value === undefined) return fallback;
-  if (typeof value !== "boolean") throw new Error(`policy: ${name} must be true or false, got ${JSON.stringify(value)}`);
+  if (typeof value !== "boolean")
+    throw new Error(`policy: ${name} must be true or false, got ${JSON.stringify(value)}`);
   return value;
 }
 
@@ -154,8 +162,13 @@ export function parsePolicy(raw: unknown): Policy {
         "reaper.compilerServerIdleSeconds",
       ),
       stopGraceSeconds: positive(r.reaper?.stopGraceSeconds, d.reaper.stopGraceSeconds, "reaper.stopGraceSeconds"),
-      killCompilerServers: bool(r.reaper?.killCompilerServers, d.reaper.killCompilerServers, "reaper.killCompilerServers"),
+      killCompilerServers: bool(
+        r.reaper?.killCompilerServers,
+        d.reaper.killCompilerServers,
+        "reaper.killCompilerServers",
+      ),
     },
+    countOutsideBuilds: bool(r.countOutsideBuilds, d.countOutsideBuilds, "countOutsideBuilds"),
     notifications: bool(r.notifications, d.notifications, "notifications"),
     priority: { minutes: positive(r.priority?.minutes, d.priority.minutes, "priority.minutes") },
     tools: parseTools(r.tools),

@@ -10,7 +10,8 @@ struct BouncerBarApp: App {
         // Design QA without screen-recording permission.
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
-            Snapshot.render(to: URL(fileURLWithPath: args[i + 1]))
+            let fixture = args.firstIndex(of: "--status-file").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+            Snapshot.render(to: URL(fileURLWithPath: args[i + 1]), fixture: fixture.map { URL(fileURLWithPath: $0) })
             exit(0)
         }
     }
@@ -28,15 +29,19 @@ struct BouncerBarApp: App {
 
 @MainActor
 enum Snapshot {
-    static func render(to dir: URL) {
+    static func render(to dir: URL, fixture: URL?) {
         let store = StatusStore()
-        let sem = DispatchSemaphore(value: 0)
-        Task.detached {
-            await store.refresh()
-            sem.signal()
-        }
-        while sem.wait(timeout: .now()) == .timedOut {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        if let fixture {
+            do { try store.load(fixture: fixture) } catch { print("bad --status-file: \(error)"); exit(1) }
+        } else {
+            let sem = DispatchSemaphore(value: 0)
+            Task.detached {
+                await store.refresh()
+                sem.signal()
+            }
+            while sem.wait(timeout: .now()) == .timedOut {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
         }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {

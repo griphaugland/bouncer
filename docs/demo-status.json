@@ -1,0 +1,22 @@
+{
+  "version": "0.3.0", "pid": 4121, "startedAt": 0, "load": "yellow", "pressureLevel": 2,
+  "freePercent": 23, "swapUsedMb": 6420, "swapTotalMb": 8192, "diskFreeGb": 112, "maxConcurrent": 2,
+  "slots": [ { "name": "dotnet", "capacity": 1, "used": 1 }, { "name": "node", "capacity": 2, "used": 1 }, { "name": "xcode", "capacity": 1, "used": 0 } ],
+  "running": [
+    { "id": 212, "slot": "dotnet", "session": "a3f9c2e1", "cmd": "dotnet test src/Api.Tests", "cwd": "/Users/sam/code/orbit", "priority": "high", "state": "running", "elapsedMs": 94000, "rssMb": 2871, "preemptCount": 0 },
+    { "id": 214, "slot": "node", "session": "7c1d04aa", "cmd": "pnpm --filter web build", "cwd": "/Users/sam/code/orbit", "priority": "normal", "state": "running", "elapsedMs": 41000, "rssMb": 1240, "preemptCount": 0 }
+  ],
+  "queued": [
+    { "id": 215, "slot": "dotnet", "session": "e81b55f0", "cmd": "dotnet build Orbit.sln", "cwd": "/Users/sam/code/orbit-billing", "priority": "normal", "state": "queued", "waitReason": "dotnet slot full (1/1)", "position": 1, "elapsedMs": 63000, "rssMb": 0, "preemptCount": 1 },
+    { "id": 216, "slot": "node", "session": "19dd7e3b", "cmd": "npx vitest run", "cwd": "/Users/sam/code/lantern", "priority": "normal", "state": "queued", "waitReason": "memory pressure elevated, one heavy job at a time", "position": 1, "elapsedMs": 12000, "rssMb": 0, "preemptCount": 0 }
+  ],
+  "external": [],
+  "sessions": [
+    { "pid": 30112, "kind": "claude", "cwd": "/Users/sam/code/orbit", "rssMb": 3410, "elapsedSec": 15200, "idleSec": 20 },
+    { "pid": 30480, "kind": "claude", "cwd": "/Users/sam/code/orbit-billing", "rssMb": 512, "elapsedSec": 9100, "idleSec": 40 },
+    { "pid": 29870, "kind": "codex", "cwd": "/Users/sam/code/lantern", "rssMb": 388, "elapsedSec": 22000, "idleSec": 300 },
+    { "pid": 27702, "kind": "claude", "cwd": "/Users/sam/code/old-spike", "rssMb": 441, "elapsedSec": 260000, "idleSec": 151000 }
+  ],
+  "advice": ["1 agent session idle for 1h+ holds 0.4 GB. Closing it is the biggest win (see Sessions below)."],
+  "prioritized": [], "jetsamSinceStart": 0, "topProcesses": []
+}

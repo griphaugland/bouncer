@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { advise, agentSessions, externalJobs, heavySlotOfProcess } from "../src/observe";
-import { parseDuration } from "../src/platform/macos";
 import type { Proc } from "../src/platform";
+import { parseDuration } from "../src/platform/macos";
 
 const p = (pid: number, ppid: number, command: string, rssKb = 1024, extra: Partial<Proc> = {}): Proc => ({
   pid,
@@ -69,7 +69,12 @@ describe("agentSessions", () => {
       p(101, 100, "node mcp-server.js", 100_000),
       p(102, 100, "/Users/x/.local/bin/claude --agent", 50_000),
       p(200, 1, "node /Users/x/.nvm/versions/node/v22/bin/codex"),
-      p(201, 200, "/Users/x/.nvm/versions/node/v22/lib/node_modules/@openai/codex/node_modules/@openai/codex/vendor/codex/codex", 20_000),
+      p(
+        201,
+        200,
+        "/Users/x/.nvm/versions/node/v22/lib/node_modules/@openai/codex/node_modules/@openai/codex/vendor/codex/codex",
+        20_000,
+      ),
     ];
     const s = agentSessions(procs);
     expect(s.map((x) => [x.pid, x.kind])).toEqual([
@@ -96,7 +101,9 @@ describe("advise", () => {
       minFreeDiskGb: 40,
     });
     expect(out[0]).toContain("1 agent session idle for 1h+ hold 0.9 GB");
-    expect(out[1]).toBe("A dotnet build Bouncer didn't start is using 1.2 GB (pid 9). Restart the session that runs it so its builds queue.");
+    expect(out[1]).toBe(
+      "A dotnet build Bouncer didn't start is using 1.2 GB (pid 9). Restart the session that runs it so its builds queue.",
+    );
     expect(out[2]).toContain("Only 34 GB disk free");
   });
 });

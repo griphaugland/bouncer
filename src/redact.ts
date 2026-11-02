@@ -1,7 +1,8 @@
 // Command lines end up in the daemon log, jobs.db and `bouncer status`. People put secrets in
 // them (`GITHUB_TOKEN=ghp_… pnpm publish`, `--password hunter2`), so redact before storing.
 
-const SECRET_NAME = "[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASS|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH|CREDENTIALS?)[A-Za-z0-9_]*";
+const SECRET_NAME =
+  "[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASS|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|AUTH|CREDENTIALS?)[A-Za-z0-9_]*";
 const ENV_ASSIGNMENT = new RegExp(`\\b(${SECRET_NAME})=("[^"]*"|'[^']*'|\\S+)`, "gi");
 const SECRET_FLAG = /(--?(?:password|passwd|token|secret|api-?key|auth|access-?key)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi;
 const URL_CREDENTIALS = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi;

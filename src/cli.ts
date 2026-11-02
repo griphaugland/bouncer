@@ -15,7 +15,9 @@ function duration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
-  return m < 60 ? `${m}m${String(s % 60).padStart(2, "0")}s` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+  return m < 60
+    ? `${m}m${String(s % 60).padStart(2, "0")}s`
+    : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
 
 function shortSession(s: string): string {
@@ -91,7 +93,10 @@ export function renderStatus(st: StatusSnapshot): string[] {
   if (!st.queued.length) out.push(dim("  nothing"));
   for (const j of st.queued) out.push(jobLine(j));
   if (st.external.length) {
-    out.push("", bold(`Outside Bouncer (${st.external.length})`) + dim("  heavy builds it did not start; they hold slots"));
+    out.push(
+      "",
+      bold(`Outside Bouncer (${st.external.length})`) + dim("  heavy builds it did not start; they hold slots"),
+    );
     for (const e of st.external) {
       out.push(
         `  ${String(e.pid).padStart(6)}  ${e.slot.padEnd(7)} ${trim(e.command.replace(/^\S*\//, ""), 52).padEnd(52)} ${String(e.rssMb).padStart(6)} MB  ${duration(e.elapsedSec * 1000)}`,
@@ -100,14 +105,16 @@ export function renderStatus(st: StatusSnapshot): string[] {
   }
   if (st.prioritized.length) {
     out.push("", bold("Prioritized sessions"));
-    for (const p of st.prioritized) out.push(`  ${shortSession(p.session)}  until ${new Date(p.until).toLocaleTimeString()}`);
+    for (const p of st.prioritized)
+      out.push(`  ${shortSession(p.session)}  until ${new Date(p.until).toLocaleTimeString()}`);
   }
   if (st.sessions.length) {
     const total = st.sessions.reduce((s, x) => s + x.rssMb, 0);
     const claude = st.sessions.filter((s) => s.kind === "claude").length;
     out.push(
       "",
-      bold(`Sessions (${claude} claude, ${st.sessions.length - claude} codex)`) + dim(`  ${(total / 1024).toFixed(1)} GB together`),
+      bold(`Sessions (${claude} claude, ${st.sessions.length - claude} codex)`) +
+        dim(`  ${(total / 1024).toFixed(1)} GB together`),
     );
     for (const s of st.sessions.slice(0, 8)) {
       const idle = s.idleSec >= 300 ? c("33", `idle ${duration(s.idleSec * 1000)}`) : dim("active");

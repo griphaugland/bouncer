@@ -51,7 +51,16 @@ export class Store {
         `INSERT INTO scheduled (argv, cwd, env, session, at, when_idle, created_at, state, log_path)
          VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?) RETURNING id`,
       )
-      .get(JSON.stringify(s.argv), s.cwd, JSON.stringify(s.env), s.session, s.at, s.whenIdle ? 1 : 0, s.createdAt, s.logPath) as {
+      .get(
+        JSON.stringify(s.argv),
+        s.cwd,
+        JSON.stringify(s.env),
+        s.session,
+        s.at,
+        s.whenIdle ? 1 : 0,
+        s.createdAt,
+        s.logPath,
+      ) as {
       id: number;
     };
     return { ...s, id: row.id, state: "pending", startedAt: null, endedAt: null, exitCode: null };
@@ -80,7 +89,11 @@ export class Store {
     }));
   }
 
-  setScheduledState(id: number, state: ScheduledRecord["state"], fields: { startedAt?: number; endedAt?: number; exitCode?: number } = {}): void {
+  setScheduledState(
+    id: number,
+    state: ScheduledRecord["state"],
+    fields: { startedAt?: number; endedAt?: number; exitCode?: number } = {},
+  ): void {
     this.ensureScheduled();
     this.db
       .query(
@@ -95,7 +108,9 @@ export class Store {
     this.ensureScheduled();
     const jobs = this.db.query("DELETE FROM jobs WHERE COALESCE(ended_at, queued_at) < ?").run(before).changes;
     const sched = this.db
-      .query("DELETE FROM scheduled WHERE state IN ('done','failed','cancelled') AND COALESCE(ended_at, created_at) < ?")
+      .query(
+        "DELETE FROM scheduled WHERE state IN ('done','failed','cancelled') AND COALESCE(ended_at, created_at) < ?",
+      )
       .run(before).changes;
     return jobs + sched;
   }

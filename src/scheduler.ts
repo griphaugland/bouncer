@@ -114,7 +114,11 @@ export class Scheduler {
 
   /** 1-based position among queued jobs competing for the same slot. */
   position(job: Job): number {
-    return this.queued().filter((j) => j.slot === job.slot).indexOf(job) + 1;
+    return (
+      this.queued()
+        .filter((j) => j.slot === job.slot)
+        .indexOf(job) + 1
+    );
   }
 
   capacity(slot: string): number {
@@ -145,8 +149,7 @@ export class Scheduler {
   finish(id: number, now: number, exitCode?: number, forced?: JobState): Job | undefined {
     const job = this.jobs.get(id);
     if (!job || TERMINAL.has(job.state)) return undefined;
-    job.state =
-      forced ?? (job.stopping === "reap" ? "reaped" : job.stopping === "cancel" ? "cancelled" : "done");
+    job.state = forced ?? (job.stopping === "reap" ? "reaped" : job.stopping === "cancel" ? "cancelled" : "done");
     job.endedAt = now;
     job.exitCode = exitCode;
     job.stopping = undefined;
@@ -256,5 +259,8 @@ export class Scheduler {
 }
 
 function newest(jobs: Job[]): Job | undefined {
-  return jobs.reduce<Job | undefined>((acc, j) => (!acc || (j.startedAt ?? 0) > (acc.startedAt ?? 0) ? j : acc), undefined);
+  return jobs.reduce<Job | undefined>(
+    (acc, j) => (!acc || (j.startedAt ?? 0) > (acc.startedAt ?? 0) ? j : acc),
+    undefined,
+  );
 }

@@ -31,7 +31,11 @@ const DIAG_DIR = "/Library/Logs/DiagnosticReports";
 export const macos: Platform = {
   sampleLoad(): LoadSample {
     const out = run([
-      "/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level", "kern.memorystatus_level", "vm.swapusage",
+      "/usr/sbin/sysctl",
+      "-n",
+      "kern.memorystatus_vm_pressure_level",
+      "kern.memorystatus_level",
+      "vm.swapusage",
     ]).split("\n");
     return {
       pressureLevel: Number(out[0]) || 1,

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import type { Socket } from "bun";
+import { takeLines } from "./lines";
 import { paths } from "./paths";
 import { type ClientMsg, PROTOCOL_VERSION, type ServerMsg } from "./protocol";
 
@@ -75,12 +76,9 @@ export class Conn {
   }
 
   private feed(chunk: Uint8Array): void {
-    this.buf += this.decoder.decode(chunk, { stream: true });
-    let nl: number;
-    while ((nl = this.buf.indexOf("\n")) >= 0) {
-      const line = this.buf.slice(0, nl);
-      this.buf = this.buf.slice(nl + 1);
-      if (!line.trim()) continue;
+    const { lines, rest } = takeLines(this.buf + this.decoder.decode(chunk, { stream: true }));
+    this.buf = rest;
+    for (const line of lines) {
       try {
         const msg = JSON.parse(line) as ServerMsg;
         for (const fn of this.listeners) fn(msg);
@@ -95,9 +93,9 @@ export class Conn {
   }
 }
 
-/** Open, send one message, return the reply. */
-export async function ask(msg: ClientMsg, timeoutMs = 2000): Promise<ServerMsg | null> {
-  const conn = await Conn.open(Math.min(timeoutMs, 1000));
+/** Open, send one message, return the reply. `timeoutMs` bounds connecting and replying each. */
+export async function ask(msg: ClientMsg, timeoutMs = 5000): Promise<ServerMsg | null> {
+  const conn = await Conn.open(timeoutMs);
   if (!conn) return null;
   return conn.request(msg, timeoutMs);
 }

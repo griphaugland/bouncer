@@ -1,7 +1,7 @@
 # Bouncer
 
 **One sentence:** A local process bouncer that watches the Mac's load, makes every heavy build, test and agent job wait its turn, and makes sure the Mac never fries.
-**Status:** v0.2 built and installed (2026-11-02) · **Owner:** Eirik · **Date:** 2026-11-02
+**Status:** v0.3.0, first release for other people (2026-11-02) · **Owner:** Eirik · **Date:** 2026-11-02
 
 ## Problem
 
@@ -31,9 +31,19 @@ The original "swap under 8 GB" target was dropped: measured on 2026-11-02, swap 
 - **Scheduling:** `--at`, `--in`, `--when-idle`; only an env allowlist is stored.
 - **Janitor:** dry run by default; caches via their own tools; build output only in worktrees idle 14d+, only if git says ignored; worktrees and untracked folders are reported, never deleted.
 
+## v0.3: ready for other people
+
+Owner-only permissions and redaction, `.env` autoload removed from the binary, agents refused
+when they try to reorder or bypass the queue, configurable tools, `bouncer doctor`, version
+checks, log rotation and history pruning, a 10 s connect wait so a swapped-out daemon still
+gates, daemon integration tests, Biome, CI, a release pipeline with optional signing and
+notarization, and a checksum-verifying installer. See CHANGELOG.md.
+
 ## Still out of scope
 
-MCP server · Codex native hook · history charts · Linux and Windows (the `platform/` boundary exists) · signing, notarizing, Homebrew.
+MCP server · Codex native hook · history charts · Linux and Windows (the `platform/` boundary exists) · Homebrew tap.
+
+- **UNKNOWN:** behaviour under real memory pressure on someone else's Mac; the gate thresholds are still Eirik's first guesses.
 
 ## How it works
 

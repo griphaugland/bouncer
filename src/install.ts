@@ -169,7 +169,9 @@ function stripBlock(text: string): string {
   const start = text.indexOf(RC_START);
   const end = text.indexOf(RC_END);
   if (start < 0 || end < start) return text;
-  return (text.slice(0, start).replace(/\n+$/, "\n") + text.slice(end + RC_END.length).replace(/^\n/, "")).trimEnd() + "\n";
+  const before = text.slice(0, start).replace(/\n+$/, "\n");
+  const after = text.slice(end + RC_END.length).replace(/^\n/, "");
+  return `${(before + after).trimEnd()}\n`;
 }
 
 function editRc(file: string, add: boolean): void {
@@ -241,7 +243,8 @@ export function install(): void {
   const domain = `gui/${process.getuid?.() ?? 501}`;
   bootoutAndWait(domain);
   const code = launchctl(["bootstrap", domain, plistPath]);
-  if (code === 0 && waitForSocket(5000)) console.log(`✓ daemon      launchd ${LAUNCHD_LABEL}, answering on ${paths.socket}`);
+  if (code === 0 && waitForSocket(5000))
+    console.log(`✓ daemon      launchd ${LAUNCHD_LABEL}, answering on ${paths.socket}`);
   else console.log(`✗ daemon      not answering (launchctl bootstrap exited ${code}); see ${paths.log}`);
 
   for (const file of settingsFiles()) {
@@ -251,7 +254,10 @@ export function install(): void {
     console.log(`✓ hooks       ${file} (+ statusline segment)`);
   }
   if (existsSync(cmuxDock)) backup(cmuxDock);
-  if (editCmuxDock(true)) console.log(`✓ cmux dock   ${cmuxDock} (seeds new windows; existing Docks: add a terminal running \`bouncer watch\`)`);
+  if (editCmuxDock(true))
+    console.log(
+      `✓ cmux dock   ${cmuxDock} (seeds new windows; existing Docks: add a terminal running \`bouncer watch\`)`,
+    );
   for (const file of rcFiles()) {
     backup(file);
     editRc(file, true);

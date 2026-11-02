@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,10 @@ import type { Subprocess } from "bun";
 // no compiler servers killed, load pinned to green.
 
 const MAIN = join(import.meta.dir, "..", "src", "main.ts");
+// The test daemon reads the real process table: real builds on this machine must not fill its
+// slots (found when a real `dotnet test` elsewhere made the dotnet-slot test wait forever).
+const TEST_POLICY =
+  "maxConcurrent: 4\nslots:\n  t: 1\n  dotnet: 1\ncountOutsideBuilds: false\nnotifications: false\nreaper:\n  killCompilerServers: false\njanitor:\n  roots: []\n";
 let home: string;
 let daemon: Subprocess | undefined;
 let env: Record<string, string>;
@@ -37,35 +41,53 @@ async function waitFor(fn: () => boolean | Promise<boolean>, ms = 8000) {
 }
 
 async function status() {
-  return JSON.parse((await output(["status", "--json"])).out);
+  const r = await output(["status", "--json"]);
+  try {
+    return JSON.parse(r.out);
+  } catch {
+    throw new Error(`status --json failed (exit ${r.code}): ${r.err.trim() || "no output"}`);
+  }
 }
 
 beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), "bouncer-it-"));
-  writeFileSync(
-    join(home, "policy.yaml"),
-    "maxConcurrent: 4\nslots:\n  t: 1\nnotifications: false\nreaper:\n  killCompilerServers: false\njanitor:\n  roots: []\n",
-  );
+  writeFileSync(join(home, "policy.yaml"), TEST_POLICY);
   env = { ...(process.env as Record<string, string>), BOUNCER_HOME: home, BOUNCER_LOAD_OVERRIDE: "green" };
   delete env.BOUNCER_JOB;
   delete env.BOUNCER_BYPASS;
-  daemon = bouncer(["daemon"]);
+  daemon = Bun.spawn([process.execPath, MAIN, "daemon"], {
+    env,
+    stdout: Bun.file(join(home, "daemon.out")),
+    stderr: Bun.file(join(home, "daemon.err")),
+  });
   await waitFor(() => existsSync(join(home, "bouncer.sock")));
 });
 
 afterEach(async () => {
+  if (process.env.BOUNCER_TEST_DEBUG) {
+    for (const f of ["daemon.err", "daemon.log"]) {
+      if (existsSync(join(home, f))) console.log(`--- ${f}\n${readFileSync(join(home, f), "utf8")}`);
+    }
+    console.log(`--- daemon exit: ${daemon?.exitCode} signal: ${daemon?.signalCode}`);
+  }
   daemon?.kill();
   await daemon?.exited;
   rmSync(home, { recursive: true, force: true });
 });
 
+// Generous timeouts: CI machines and a Mac under memory pressure (where this tool lives) are slow.
+setDefaultTimeout(20_000);
+
 describe("daemon + clients", () => {
   test("a capacity-1 slot runs jobs one after the other", async () => {
     const log = join(home, "order.log");
     const job = (name: string) =>
-      bouncer(["run", "--slot", "t", "--", "sh", "-c", `echo ${name}-start >> ${log}; sleep 0.6; echo ${name}-end >> ${log}`], {
-        BOUNCER_SESSION: name,
-      });
+      bouncer(
+        ["run", "--slot", "t", "--", "sh", "-c", `echo ${name}-start >> ${log}; sleep 0.6; echo ${name}-end >> ${log}`],
+        {
+          BOUNCER_SESSION: name,
+        },
+      );
     const a = job("a");
     await waitFor(() => existsSync(log));
     const b = job("b");
@@ -75,9 +97,12 @@ describe("daemon + clients", () => {
 
   test("a prioritized session preempts a running job, which reruns afterwards", async () => {
     const log = join(home, "preempt.log");
-    const a = bouncer(["run", "--slot", "t", "--", "sh", "-c", `echo a-start >> ${log}; sleep 3; echo a-end >> ${log}`], {
-      BOUNCER_SESSION: "slow",
-    });
+    const a = bouncer(
+      ["run", "--slot", "t", "--", "sh", "-c", `echo a-start >> ${log}; sleep 3; echo a-end >> ${log}`],
+      {
+        BOUNCER_SESSION: "slow",
+      },
+    );
     await waitFor(() => existsSync(log));
     expect((await output(["prioritize", "urgent"])).code).toBe(0);
     const b = bouncer(["run", "--slot", "t", "--", "sh", "-c", `echo b-ran >> ${log}`], { BOUNCER_SESSION: "urgent" });
@@ -110,7 +135,7 @@ describe("daemon + clients", () => {
     const shims = join(home, "bin");
     mkdirSync(shims, { recursive: true });
     const a = bouncer(["run", "--slot", "dotnet", "--", "sleep", "5"]);
-    writeFileSync(join(home, "policy.yaml"), "slots:\n  dotnet: 1\nnotifications: false\nreaper:\n  killCompilerServers: false\n");
+    writeFileSync(join(home, "policy.yaml"), `${TEST_POLICY}`);
     await waitFor(async () => (await status()).running.length === 1);
     const input = JSON.stringify({
       session_id: "s1",
@@ -155,4 +180,22 @@ test("with no daemon, builds fail open and still run", async () => {
   expect((await new Response(p.stdout).text()).trim()).toBe("ran");
   expect(await new Response(p.stderr).text()).toContain("running unguarded");
   rmSync(lonely, { recursive: true, force: true });
+});
+
+test("a stale socket with no daemon behind it fails open immediately, not after the connect timeout", async () => {
+  const stale = mkdtempSync(join(tmpdir(), "bouncer-stale-"));
+  // A socket file whose listener is gone: what a crashed daemon leaves behind.
+  const server = Bun.listen({ unix: join(stale, "bouncer.sock"), socket: { data() {} } });
+  server.stop(true);
+  if (!existsSync(join(stale, "bouncer.sock"))) writeFileSync(join(stale, "bouncer.sock"), "");
+  const started = Date.now();
+  const p = Bun.spawn([process.execPath, MAIN, "run", "--slot", "t", "--", "echo", "ran"], {
+    env: { ...(process.env as Record<string, string>), BOUNCER_HOME: stale },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(await p.exited).toBe(0);
+  expect((await new Response(p.stdout).text()).trim()).toBe("ran");
+  expect(Date.now() - started).toBeLessThan(3000);
+  rmSync(stale, { recursive: true, force: true });
 });

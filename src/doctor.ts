@@ -29,7 +29,11 @@ function mode(path: string): number {
 /** PATH and `command -v` results as a fresh login shell sees them, i.e. as new agent sessions will. */
 function loginShell(script: string): string {
   const shell = process.env.SHELL || "/bin/zsh";
-  const r = Bun.spawnSync([shell, "-ilc", script], { stdout: "pipe", stderr: "ignore", env: { HOME: homedir(), TERM: "dumb" } });
+  const r = Bun.spawnSync([shell, "-ilc", script], {
+    stdout: "pipe",
+    stderr: "ignore",
+    env: { HOME: homedir(), TERM: "dumb" },
+  });
   return r.stdout.toString();
 }
 
@@ -39,17 +43,27 @@ export async function doctorCommand(): Promise<void> {
 
   // Installed binary
   if (!existsSync(paths.binary)) {
-    add("fail", `not installed (${paths.binary} missing)`, "run `bouncer install` from a release or `bun run install-local`");
+    add(
+      "fail",
+      `not installed (${paths.binary} missing)`,
+      "run `bouncer install` from a release or `bun run install-local`",
+    );
   } else {
     const installed = Bun.spawnSync([paths.binary, "--version"], { stdout: "pipe" }).stdout.toString().trim();
     if (installed === VERSION) add("ok", `installed binary v${installed}`);
-    else add("warn", `installed binary is v${installed}, this one is v${VERSION}`, "run `bouncer install` with the version you want");
+    else
+      add(
+        "warn",
+        `installed binary is v${installed}, this one is v${VERSION}`,
+        "run `bouncer install` with the version you want",
+      );
   }
 
   // Permissions
   if (existsSync(paths.home)) {
     const m = mode(paths.home);
-    if (m & 0o077) add("fail", `${paths.home} is readable by other users (mode ${m.toString(8)})`, `chmod 700 ${paths.home}`);
+    if (m & 0o077)
+      add("fail", `${paths.home} is readable by other users (mode ${m.toString(8)})`, `chmod 700 ${paths.home}`);
     else add("ok", `${paths.home} is private (700)`);
   }
 
@@ -64,12 +78,21 @@ export async function doctorCommand(): Promise<void> {
   if (reply?.type === "status") {
     const s = reply.status;
     if (s.version === VERSION) add("ok", `daemon answering (v${s.version}, pid ${s.pid}, load ${s.load})`);
-    else add("warn", `daemon answering but runs v${s.version ?? "?"}, CLI is v${VERSION}`, "run `bouncer install` to restart it");
+    else
+      add(
+        "warn",
+        `daemon answering but runs v${s.version ?? "?"}, CLI is v${VERSION}`,
+        "run `bouncer install` to restart it",
+      );
     if (existsSync(paths.socket) && mode(paths.socket) & 0o077) {
       add("fail", "socket is accessible to other users", "restart the daemon: `bouncer install`");
     }
   } else {
-    add("fail", "daemon not answering on its socket", `check ${paths.log} and ${join(paths.home, "daemon.stdout.log")}`);
+    add(
+      "fail",
+      "daemon not answering on its socket",
+      `check ${paths.log} and ${join(paths.home, "daemon.stdout.log")}`,
+    );
   }
 
   // Policy
@@ -87,10 +110,17 @@ export async function doctorCommand(): Promise<void> {
   const out = loginShell(
     `echo "${marker}PATH=$PATH"; for t in ${tools.join(" ")}; do printf "${marker}%s=%s\\n" "$t" "$(command -v $t 2>/dev/null)"; done`,
   );
-  const lines = out.split("\n").filter((l) => l.startsWith(marker)).map((l) => l.slice(marker.length));
+  const lines = out
+    .split("\n")
+    .filter((l) => l.startsWith(marker))
+    .map((l) => l.slice(marker.length));
   const loginPath = lines.find((l) => l.startsWith("PATH="))?.slice(5) ?? "";
   if (!loginPath.split(":").includes(paths.shimDir)) {
-    add("fail", "shims are not on PATH in a new login shell", `add \`export PATH="${paths.shimDir}:$PATH"\` at the END of your shell rc, or rerun \`bouncer install\``);
+    add(
+      "fail",
+      "shims are not on PATH in a new login shell",
+      `add \`export PATH="${paths.shimDir}:$PATH"\` at the END of your shell rc, or rerun \`bouncer install\``,
+    );
   } else {
     add("ok", "shims are on PATH in new shells");
     const shadowed: string[] = [];
@@ -134,9 +164,14 @@ export async function doctorCommand(): Promise<void> {
   // Machine
   if (reply?.type === "status") {
     const s = reply.status;
-    if (s.diskFreeGb >= 0 && s.diskFreeGb < 20) add("warn", `only ${s.diskFreeGb} GB disk free; macOS swaps there`, "`bouncer clean`");
+    if (s.diskFreeGb >= 0 && s.diskFreeGb < 20)
+      add("warn", `only ${s.diskFreeGb} GB disk free; macOS swaps there`, "`bouncer clean`");
     if (s.jetsamSinceStart > 0) {
-      add("warn", `${s.jetsamSinceStart} macOS out-of-memory event(s) since the daemon started`, `lower gate thresholds in ${paths.policy}`);
+      add(
+        "warn",
+        `${s.jetsamSinceStart} macOS out-of-memory event(s) since the daemon started`,
+        `lower gate thresholds in ${paths.policy}`,
+      );
     }
   }
 

@@ -62,6 +62,7 @@ switch (cmd) {
       else if (args[0] === "prompt") await promptHook();
     } catch {}
     process.exit(0);
+    break;
   case "status":
   case "queue":
     await statusCommand(args);

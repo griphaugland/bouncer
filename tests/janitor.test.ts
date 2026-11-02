@@ -8,7 +8,10 @@ const repo = mkdtempSync(join(tmpdir(), "bouncer-janitor-"));
 afterAll(() => rmSync(repo, { recursive: true, force: true }));
 
 function git(...args: string[]) {
-  const r = Bun.spawnSync(["git", "-C", repo, "-c", "commit.gpgsign=false", ...args], { stdout: "ignore", stderr: "pipe" });
+  const r = Bun.spawnSync(["git", "-C", repo, "-c", "commit.gpgsign=false", ...args], {
+    stdout: "ignore",
+    stderr: "pipe",
+  });
   if (r.exitCode !== 0) throw new Error(r.stderr.toString());
 }
 
@@ -25,6 +28,8 @@ test("only directories git reports as ignored are cleanable", () => {
   mkdirSync(join(repo, "coverage")); // build-dir name but NOT ignored → must survive
   // bin/ is tracked → must survive
 
-  const dirs = ignoredBuildDirs(repo).map((d) => d.slice(repo.length + 1)).sort();
+  const dirs = ignoredBuildDirs(repo)
+    .map((d) => d.slice(repo.length + 1))
+    .sort();
   expect(dirs).toEqual(["node_modules", "src/Api/obj"]);
 });

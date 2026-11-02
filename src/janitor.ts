@@ -12,7 +12,17 @@ import { resolveReal } from "./run";
 //     touched for `janitor.staleDays` and no agent session is working in, are deleted.
 // Everything else (stale worktrees, untracked output folders) is reported, never deleted.
 
-const BUILD_DIRS = ["node_modules", "bin", "obj", ".next", ".turbo", ".vite", "coverage", "playwright-report", "test-results"];
+const BUILD_DIRS = [
+  "node_modules",
+  "bin",
+  "obj",
+  ".next",
+  ".turbo",
+  ".vite",
+  "coverage",
+  "playwright-report",
+  "test-results",
+];
 
 interface Category {
   id: string;
@@ -33,7 +43,11 @@ function duBytes(path: string): number {
 function runTool(tool: string, args: string[]): void {
   const real = resolveReal(tool);
   if (!real) throw new Error(`${tool} not found`);
-  const res = Bun.spawnSync([real, ...args], { stdout: "inherit", stderr: "inherit", env: { ...process.env, BOUNCER_BYPASS: "1" } });
+  const res = Bun.spawnSync([real, ...args], {
+    stdout: "inherit",
+    stderr: "inherit",
+    env: { ...process.env, BOUNCER_BYPASS: "1" },
+  });
   if (res.exitCode !== 0) throw new Error(`${tool} ${args.join(" ")} exited ${res.exitCode}`);
 }
 
@@ -53,12 +67,28 @@ export function findWorktrees(roots: string[], maxDepth = 5): Worktree[] {
   for (const root of roots) {
     if (!existsSync(root)) continue;
     const res = Bun.spawnSync(
-      ["/usr/bin/find", root, "-maxdepth", String(maxDepth), "-name", "node_modules", "-prune", "-o", "-name", ".git", "-type", "f", "-print"],
+      [
+        "/usr/bin/find",
+        root,
+        "-maxdepth",
+        String(maxDepth),
+        "-name",
+        "node_modules",
+        "-prune",
+        "-o",
+        "-name",
+        ".git",
+        "-type",
+        "f",
+        "-print",
+      ],
       { stdout: "pipe", stderr: "ignore" },
     );
     for (const gitFile of res.stdout.toString().split("\n").filter(Boolean)) {
       const path = gitFile.slice(0, -"/.git".length);
-      const pointer = readFileSync(gitFile, "utf8").match(/gitdir:\s*(.*)/)?.[1]?.trim();
+      const pointer = readFileSync(gitFile, "utf8")
+        .match(/gitdir:\s*(.*)/)?.[1]
+        ?.trim();
       if (!pointer) continue;
       const gitdir = resolve(path, pointer);
       let last = 0;
@@ -97,7 +127,10 @@ export function ignoredBuildDirs(worktree: string): string[] {
 /** `git status --porcelain` lines, or null when git cannot read the worktree (never "clean"). */
 function porcelain(worktree: string): string[] | null {
   const git = resolveReal("git") ?? "/usr/bin/git";
-  const out = Bun.spawnSync([git, "--no-optional-locks", "-C", worktree, "status", "--porcelain"], { stdout: "pipe", stderr: "ignore" });
+  const out = Bun.spawnSync([git, "--no-optional-locks", "-C", worktree, "status", "--porcelain"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
   if (out.exitCode !== 0) return null;
   return out.stdout.toString().split("\n").filter(Boolean);
 }
@@ -134,7 +167,11 @@ function categories(staleWorktrees: Worktree[]): Category[] {
       note: "only git-ignored dirs (node_modules, bin, obj, .next, ...); reinstall/rebuild brings them back",
       scan() {
         const targets = staleWorktrees.flatMap((w) => ignoredBuildDirs(w.path));
-        return { bytes: targets.reduce((s, t) => s + duBytes(t), 0), detail: `${targets.length} dirs in ${staleWorktrees.length} worktrees`, targets };
+        return {
+          bytes: targets.reduce((s, t) => s + duBytes(t), 0),
+          detail: `${targets.length} dirs in ${staleWorktrees.length} worktrees`,
+          targets,
+        };
       },
       apply(targets) {
         for (const t of targets) rmSync(t, { recursive: true, force: true });
@@ -143,7 +180,13 @@ function categories(staleWorktrees: Worktree[]): Category[] {
     {
       id: "pnpm-store",
       title: "pnpm store, unreferenced packages",
-      scan: () => (resolveReal("pnpm") ? { bytes: duBytes(join(home, "Library/pnpm/store")), detail: "total store size; prune removes only unreferenced" } : null),
+      scan: () =>
+        resolveReal("pnpm")
+          ? {
+              bytes: duBytes(join(home, "Library/pnpm/store")),
+              detail: "total store size; prune removes only unreferenced",
+            }
+          : null,
       apply: () => runTool("pnpm", ["store", "prune"]),
     },
     {
@@ -227,7 +270,8 @@ export async function cleanCommand(args: string[]): Promise<void> {
   for (const r of results) {
     const tag = r.cat.optIn ? " (opt-in)" : "";
     console.log(`  ${gb(r.bytes).padStart(8)}  ${r.cat.id.padEnd(22)} ${r.cat.title}${tag}`);
-    for (const line of [r.detail, r.cat.note].filter(Boolean)) console.log(`  ${"".padStart(8)}  ${"".padEnd(22)} ${dim(line!)}`);
+    for (const line of [r.detail, r.cat.note].filter(Boolean))
+      console.log(`  ${"".padStart(8)}  ${"".padEnd(22)} ${dim(line!)}`);
   }
 
   // Report-only: whole worktrees. Removing one is a human call (uncommitted work, local files).
@@ -237,7 +281,9 @@ export async function cleanCommand(args: string[]): Promise<void> {
     .slice(0, 10);
   if (sized.length) {
     const total = stale.length;
-    console.log(`\nIdle worktrees (${total} untouched ${policy.janitor.staleDays}d+, largest first). Bouncer never removes these:\n`);
+    console.log(
+      `\nIdle worktrees (${total} untouched ${policy.janitor.staleDays}d+, largest first). Bouncer never removes these:\n`,
+    );
     for (const w of sized) {
       const age = w.lastActivity ? `${Math.round((now - w.lastActivity) / 86_400_000)}d` : "?";
       const lines = porcelain(w.path);
@@ -250,8 +296,14 @@ export async function cleanCommand(args: string[]): Promise<void> {
             : "clean";
       console.log(`  ${gb(w.bytes).padStart(8)}  ${age.padStart(4)}  ${pretty}  ${state}`);
       const big = lines?.length ? largestUntracked(w.path, lines) : null;
-      if (big) console.log(`  ${"".padStart(14)}${dim(`${gb(big.bytes)} of it is untracked ${big.path} (yours to keep or delete)`)}`);
-      if (lines === null) console.log(`  ${"".padStart(14)}${dim(`inspect by hand; \`git worktree prune\` in the main repo cleans up dangling entries`)}`);
+      if (big)
+        console.log(
+          `  ${"".padStart(14)}${dim(`${gb(big.bytes)} of it is untracked ${big.path} (yours to keep or delete)`)}`,
+        );
+      if (lines === null)
+        console.log(
+          `  ${"".padStart(14)}${dim(`inspect by hand; \`git worktree prune\` in the main repo cleans up dangling entries`)}`,
+        );
       else if (!lines.length) console.log(`  ${"".padStart(14)}${dim(`git -C ${pretty} worktree remove .`)}`);
     }
   }
@@ -260,9 +312,7 @@ export async function cleanCommand(args: string[]): Promise<void> {
     console.log("\nDry run. Nothing was deleted.");
     return;
   }
-  const chosen = results.filter((r) =>
-    wanted.includes("all") ? !r.cat.optIn : wanted.includes(r.cat.id),
-  );
+  const chosen = results.filter((r) => (wanted.includes("all") ? !r.cat.optIn : wanted.includes(r.cat.id)));
   if (!chosen.length) {
     console.error("\nbouncer: name what to clean, e.g. `bouncer clean --apply pnpm-store npm-cache` or `--apply all`");
     process.exit(2);

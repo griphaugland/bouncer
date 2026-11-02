@@ -249,7 +249,7 @@ private struct QueueSection: View {
                         RowAction(title: "Drop", systemImage: "xmark") { Task { await store.cancel(job: job.id) } }
                     }
                     if let reason = job.waitReason {
-                        Text(reason).font(.caption).foregroundStyle(.secondary).padding(.leading, 2)
+                        Text(reason).font(.caption).foregroundStyle(.secondary).padding(.leading, 18)
                     }
                 }
             }
@@ -266,10 +266,11 @@ private struct JobRow<Actions: View>: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            if job.priority == "high" {
-                Image(systemName: "arrow.up").font(.caption2.weight(.bold)).foregroundStyle(.orange)
-                    .help("Prioritized")
-            }
+            // Fixed-width gutter so a prioritized row's columns line up with the rest.
+            Image(systemName: "arrow.up").font(.caption2.weight(.bold)).foregroundStyle(.orange)
+                .opacity(job.priority == "high" ? 1 : 0)
+                .frame(width: 10)
+                .help(job.priority == "high" ? "Prioritized" : "")
             Text(job.slot).font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 44, alignment: .leading)
             Text(job.cmd).font(.callout).lineLimit(1).truncationMode(.middle)
                 .help("\(job.cmd)\n\(homeRelative(job.cwd))")
@@ -359,6 +360,7 @@ private struct SessionsSection: View {
                             .frame(width: 64, alignment: .leading)
                         Text(s.idleSec >= 300 ? "idle \(formatDuration(seconds: s.idleSec))" : "active")
                             .font(.caption).foregroundStyle(s.idleSec >= 3600 ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                            .frame(width: 72, alignment: .leading)
                         Text(formatMb(s.rssMb)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                             .frame(width: 56, alignment: .trailing)
                     }

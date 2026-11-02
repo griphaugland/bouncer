@@ -1,14 +1,15 @@
 import { accessSync, constants } from "node:fs";
-import { basename, delimiter, join } from "node:path";
 import { constants as osConstants } from "node:os";
+import { basename, delimiter, join } from "node:path";
 import { classifyInvocation, DEFAULT_TOOL_RULES, type ToolRules } from "./classify";
-import { loadPolicy } from "./policy";
 import { Conn } from "./conn";
 import { paths } from "./paths";
 import { getPlatform, killTree } from "./platform";
+import { loadPolicy } from "./policy";
 import type { ServerMsg } from "./protocol";
 
 const STOP_GRACE_MS = 10_000;
+const GATE_CONNECT_MS = 10_000;
 
 /** Tool rules from the policy; a broken policy file must never stop a build, so fall back. */
 export function safeTools(): ToolRules {
@@ -78,7 +79,10 @@ function relaySignals(getChild: () => { kill(sig: NodeJS.Signals): void } | unde
 /** Run without asking anyone: light commands, nested calls, and the fail-open path. */
 async function passthrough(real: string, args: string[]): Promise<never> {
   const proc = Bun.spawn([real, ...args], { stdio: ["inherit", "inherit", "inherit"], env: process.env });
-  relaySignals(() => proc, () => process.exit(130));
+  relaySignals(
+    () => proc,
+    () => process.exit(130),
+  );
   await proc.exited;
   process.exit(exitCodeOf(proc));
 }
@@ -94,7 +98,9 @@ export async function gatedRun(opts: { tool: string; real: string; args: string[
   const slot = opts.slot ?? classifyInvocation(opts.tool, args, safeTools());
   if (!slot) return passthrough(real, args);
 
-  const conn = await Conn.open(1000);
+  // A dead daemon refuses instantly, so this long wait only applies to a live but slow one:
+  // under memory pressure the daemon may be swapped out, which is exactly when the gate matters.
+  const conn = await Conn.open(GATE_CONNECT_MS);
   if (!conn) {
     say("daemon not running, running unguarded");
     return passthrough(real, args);

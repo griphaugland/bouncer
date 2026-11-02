@@ -50,6 +50,12 @@ final class StatusStore {
         }
     }
 
+    /// Show a recorded status instead of the live one (README screenshots, design QA).
+    func load(fixture url: URL) throws {
+        status = try JSONDecoder().decode(Status.self, from: Data(contentsOf: url))
+        problem = nil
+    }
+
     func prioritize(job: Int) async { _ = await Self.run(["prioritize", String(job)]); await refresh() }
     func cancel(job: Int) async { _ = await Self.run(["cancel", String(job)]); await refresh() }
 

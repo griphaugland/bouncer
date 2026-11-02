@@ -15,7 +15,10 @@ export interface ToolRule {
 export type ToolRules = Record<string, ToolRule>;
 
 export const DEFAULT_TOOL_RULES: ToolRules = {
-  cargo: { slot: "rust", heavy: ["build", "b", "test", "t", "run", "r", "check", "c", "clippy", "bench", "install", "doc"] },
+  cargo: {
+    slot: "rust",
+    heavy: ["build", "b", "test", "t", "run", "r", "check", "c", "clippy", "bench", "install", "doc"],
+  },
   go: { slot: "go", heavy: ["build", "test", "run", "install", "vet", "generate"] },
   swift: { slot: "xcode", heavy: ["build", "test", "run"] },
   gradle: { slot: "jvm", heavy: ["build", "test", "assemble", "check", "bootRun", "run"] },
@@ -41,15 +44,45 @@ function classifyGeneric(rule: ToolRule, args: string[]): string | null {
 }
 
 const DOTNET_HEAVY = new Set([
-  "build", "test", "run", "publish", "pack", "watch", "restore", "msbuild", "clean", "vstest", "format", "ef",
+  "build",
+  "test",
+  "run",
+  "publish",
+  "pack",
+  "watch",
+  "restore",
+  "msbuild",
+  "clean",
+  "vstest",
+  "format",
+  "ef",
 ]);
 
 // Long-running dev servers would hold a slot forever, so they are never gated.
 const JS_LONG_RUNNING = new Set(["dev", "start", "serve", "preview"]);
 
 const JS_HEAVY_NAMES = new Set([
-  "install", "i", "ci", "add", "build", "test", "t", "vitest", "jest", "tsc", "lint", "eslint",
-  "typecheck", "type-check", "check", "e2e", "playwright", "turbo", "next", "vite", "storybook",
+  "install",
+  "i",
+  "ci",
+  "add",
+  "build",
+  "test",
+  "t",
+  "vitest",
+  "jest",
+  "tsc",
+  "lint",
+  "eslint",
+  "typecheck",
+  "type-check",
+  "check",
+  "e2e",
+  "playwright",
+  "turbo",
+  "next",
+  "vite",
+  "storybook",
 ]);
 const JS_HEAVY_PATTERN = /(build|test|lint|typecheck|type-check|tsc|e2e)/;
 

@@ -28,6 +28,10 @@ describe("descendants", () => {
       [4, 3, "c"],
       [5, 1, "other"],
     ].map(([pid, ppid, command]) => ({ pid, ppid, rssKb: 0, cpuSec: 0, elapsedSec: 0, command }) as Proc);
-    expect(descendants(procs, 2).map((p) => p.pid).sort()).toEqual([3, 4]);
+    expect(
+      descendants(procs, 2)
+        .map((p) => p.pid)
+        .sort(),
+    ).toEqual([3, 4]);
   });
 });

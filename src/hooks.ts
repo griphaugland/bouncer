@@ -19,6 +19,24 @@ function emit(output: unknown): void {
 }
 
 /**
+ * Commands only the human may run. An agent that bypasses the gate or reorders the queue for
+ * itself defeats the point, and agents do reach for whatever makes their own task finish first.
+ */
+const HUMAN_ONLY = [
+  { re: /\bBOUNCER_BYPASS=/, what: "skipping the Bouncer queue (BOUNCER_BYPASS)" },
+  { re: /\bbouncer\s+(prioritize|cancel|unschedule|uninstall)\b/, what: "changing Bouncer's queue or install" },
+  { re: /\bbouncer\s+clean\b[^\n;&|]*--apply/, what: "deleting files with bouncer clean --apply" },
+  { re: /\blaunchctl\s+(bootout|unload|kill|disable)\b[^\n]*com\.bouncer/, what: "stopping the Bouncer daemon" },
+];
+
+export function humanOnlyReason(command: string): string | null {
+  const hit = HUMAN_ONLY.find((h) => h.re.test(command));
+  return hit
+    ? `Bouncer: ${hit.what} is reserved for the user. Ask them to do it (or to say "prioritize this" if this work is urgent), or run the command normally and let it wait its turn.`
+    : null;
+}
+
+/**
  * Claude Code PreToolUse (matcher: Bash). Never blocks the agent's work and never adds a
  * permission prompt; every failure path exits 0 with no output, which leaves the call as it was.
  *
@@ -29,7 +47,20 @@ export async function preToolHook(): Promise<void> {
   const input = await readStdin();
   if (input?.tool_name !== "Bash") return;
   const toolInput = input.tool_input ?? {};
-  if (toolInput.run_in_background || typeof toolInput.command !== "string") return;
+  if (typeof toolInput.command !== "string") return;
+
+  const forbidden = humanOnlyReason(toolInput.command);
+  if (forbidden) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: forbidden,
+      },
+    });
+    return;
+  }
+  if (toolInput.run_in_background) return;
 
   // Sessions started before `bouncer install` don't have the shims on PATH; nothing would gate.
   if (!(process.env.PATH ?? "").split(":").includes(paths.shimDir)) return;

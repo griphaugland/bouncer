@@ -18,10 +18,13 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile --ignore-scripts
 
+      # v1.2.3 is a release; v1.2.3-rc.1 (any suffix) is a pre-release of the same version, used
+      # to rehearse signing, notarization and the tap push without touching what users install.
       - name: Tag matches package.json
         run: |
           pkg="v$(sed -n 's/.*"version": "\(.*\)".*/\1/p' package.json | head -1)"
-          [ "$pkg" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME != package.json $pkg"; exit 1; }
+          [ "$pkg" = "${GITHUB_REF_NAME%%-*}" ] || { echo "tag $GITHUB_REF_NAME != package.json $pkg"; exit 1; }
+          case "$GITHUB_REF_NAME" in *-*) echo "PRERELEASE=true" >> "$GITHUB_ENV" ;; *) echo "PRERELEASE=false" >> "$GITHUB_ENV" ;; esac
 
       - name: Check
         run: bun run typecheck && bun run lint && bun run build && bun test
@@ -55,6 +58,8 @@ jobs:
         run: scripts/package.sh
 
       - name: Render Homebrew formula and cask
+        env:
+          BOUNCER_DOWNLOAD_BASE: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
         run: |
           scripts/homebrew.sh dist/release dist/homebrew-tap
           cp dist/homebrew-tap/Formula/bouncer.rb dist/release/homebrew-formula-bouncer.rb
@@ -65,7 +70,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="$(awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## \\[?"v {f=1; next} /^## / && f {exit} f' CHANGELOG.md)"
-          gh release create "$GITHUB_REF_NAME" dist/release/* --title "Bouncer $GITHUB_REF_NAME" --notes "${notes:-See CHANGELOG.md}"
+          flags=(); [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/release/* "${flags[@]}" --title "Bouncer $GITHUB_REF_NAME" --notes "${notes:-See CHANGELOG.md}"
 
       # Needs a fine-grained token with contents:write on griphaugland/homebrew-tap. The cask only
       # ships from signed releases: Homebrew quarantines cask downloads, and macOS blocks an
@@ -84,7 +90,8 @@ jobs:
           git config user.email "bouncer-release@users.noreply.github.com"
           git add -A
           git commit -m "bouncer ${GITHUB_REF_NAME#v}" || { echo "tap already up to date"; exit 0; }
-          git push
+          # Pre-releases go to their own tap branch (rc/<tag>): brew users only ever read main.
+          if [ "$PRERELEASE" = "true" ]; then git push origin "HEAD:refs/heads/rc/$GITHUB_REF_NAME"; else git push; fi
     # Only a yes/no reaches every step; the certificate itself stays in the one step that imports it,
     # so dependency install scripts can never read it.
     env:

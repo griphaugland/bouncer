@@ -4,6 +4,7 @@ import { agents } from "./agents";
 import { shimmedTools } from "./classify";
 import { ask } from "./conn";
 import { readJson } from "./files";
+import { homebrewInstall } from "./install";
 import { describe, recommend, scanMachine } from "./machine";
 import { launchdLabel, paths, userHome } from "./paths";
 import { loadPolicy } from "./policy";
@@ -13,14 +14,15 @@ import { VERSION } from "./version";
 // `bouncer doctor`: every way an install can be quietly broken on someone else's machine,
 // each with the fix. Exit code 1 when anything fails, so it works in scripts and issues.
 
-type Level = "ok" | "warn" | "fail";
+// "note" is an instruction for the user, not a finding: shown, never counted as a warning.
+type Level = "ok" | "note" | "warn" | "fail";
 interface Check {
   level: Level;
   title: string;
   fix?: string;
 }
 
-const glyph: Record<Level, () => string> = { ok: mark.ok, warn: mark.warn, fail: mark.fail };
+const glyph: Record<Level, () => string> = { ok: mark.ok, note: mark.arrow, warn: mark.warn, fail: mark.fail };
 
 function mode(path: string): number {
   return statSync(path).mode & 0o777;
@@ -56,6 +58,19 @@ export async function doctorCommand(): Promise<void> {
         "warn",
         `installed binary is v${installed}, this one is v${VERSION}`,
         "run `bouncer install` with the version you want",
+      );
+  }
+
+  // Homebrew: the daemon copies `brew upgrade`s over only if it knows to follow Homebrew's binary.
+  const brew = homebrewInstall();
+  if (brew && existsSync(paths.binary)) {
+    const source = existsSync(paths.source) ? readFileSync(paths.source, "utf8").trim() : "";
+    if (source === brew) add("ok", "follows Homebrew upgrades");
+    else
+      add(
+        "warn",
+        "installed with Homebrew, but the daemon runs a separate copy that `brew upgrade` won't update",
+        "run `bouncer setup` once (your choices are kept)",
       );
   }
 
@@ -154,7 +169,7 @@ export async function doctorCommand(): Promise<void> {
     try {
       if (agent.connected()) {
         add("ok", `${agent.name} connected`);
-        if (agent.followUp) add("ok", out.dim(agent.followUp));
+        if (agent.followUp) add("note", out.dim(agent.followUp));
       } else add("warn", `${agent.name} was chosen in setup but isn't connected`, "run `bouncer setup`");
     } catch (e) {
       add("warn", `could not read ${agent.name}'s config: ${(e as Error).message}`);

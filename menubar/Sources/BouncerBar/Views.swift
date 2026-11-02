@@ -136,13 +136,17 @@ private struct Header: View {
             }
             MemoryBar(freePercent: status.freePercent, load: status.load)
             Text(status.load.explanation).font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 14) {
+            // A grid, not a row: a Mac with every toolchain has seven slots, and a row truncated
+            // them to "do…" next to the swap figure.
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 78), spacing: 12, alignment: .leading)],
+                alignment: .leading, spacing: 6
+            ) {
                 ForEach(status.slots) { slot in SlotPips(slot: slot, outside: status.external.filter { $0.slot == slot.name }.count) }
-                Spacer()
-                Text("swap \(formatMb(status.swapUsedMb)) · disk \(status.diskFreeGb) GB")
-                    .font(.caption).monospacedDigit().foregroundStyle(.tertiary)
             }
             .padding(.top, 2)
+            Text("swap \(formatMb(status.swapUsedMb)) · disk \(status.diskFreeGb) GB free")
+                .font(.caption).monospacedDigit().foregroundStyle(.tertiary)
         }
     }
 }
@@ -172,7 +176,7 @@ private struct SlotPips: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text(slot.name).font(.caption).foregroundStyle(.secondary)
+            Text(slot.name).font(.caption).foregroundStyle(.secondary).lineLimit(1).fixedSize()
             HStack(spacing: 2) {
                 ForEach(0..<max(slot.capacity, slot.used + outside), id: \.self) { i in
                     Circle()
@@ -360,15 +364,16 @@ private struct SessionsSection: View {
                 ForEach(sessions.prefix(12)) { s in
                     HStack(spacing: 8) {
                         Text(s.kind).font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 44, alignment: .leading)
+                        // The folder name is what tells sessions apart, so it gets the width; one
+                        // status column says "idle 2h" when that matters and the uptime otherwise.
                         Text(s.cwd.map { ($0 as NSString).lastPathComponent } ?? "pid \(String(s.pid))")
                             .font(.callout).lineLimit(1).truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .help(homeRelative(s.cwd))
-                        Spacer(minLength: 6)
-                        Text("up \(formatDuration(seconds: s.elapsedSec))").font(.caption).monospacedDigit().foregroundStyle(.tertiary)
-                            .frame(width: 64, alignment: .leading)
-                        Text(s.idleSec >= 300 ? "idle \(formatDuration(seconds: s.idleSec))" : "active")
-                            .font(.caption).foregroundStyle(s.idleSec >= 3600 ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                            .frame(width: 72, alignment: .leading)
+                        Text(s.idleSec >= 300 ? "idle \(formatDuration(seconds: s.idleSec))" : "up \(formatDuration(seconds: s.elapsedSec))")
+                            .font(.caption).monospacedDigit()
+                            .foregroundStyle(s.idleSec >= 3600 ? AnyShapeStyle(.orange) : s.idleSec >= 300 ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
+                            .lineLimit(1).frame(width: 70, alignment: .leading)
                         Text(formatMb(s.rssMb)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                             .frame(width: 56, alignment: .trailing)
                     }

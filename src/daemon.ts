@@ -87,6 +87,7 @@ export async function runDaemon(): Promise<void> {
   let sessions: StatusSnapshot["sessions"] = [];
   let advice: string[] = [];
   let compilerServerMb = 0;
+  let diskFreeGb = Number.POSITIVE_INFINITY;
   // Per session pid: CPU seen at the last sample and when it was last busy.
   const activity = new Map<number, { cpuSec: number; at: number; activeAt: number }>();
   let cwds = new Map<number, string>();
@@ -187,6 +188,7 @@ export async function runDaemon(): Promise<void> {
       external,
       sessions,
       advice,
+      diskFreeGb: Number.isFinite(diskFreeGb) ? Math.round(diskFreeGb) : -1,
     };
   };
 
@@ -236,12 +238,17 @@ export async function runDaemon(): Promise<void> {
     sessions.sort((a, b) => b.rssMb - a.rssMb);
 
     compilerServerMb = compilerServers(procs).reduce((s, p) => s + p.rssKb, 0) / 1024;
+    try {
+      diskFreeGb = platform.diskFreeGb();
+    } catch {}
     advice = advise({
       sessions,
       external,
       compilerServerMb,
       freePercent: sample.freePercent,
       idleThresholdSec: IDLE_ADVICE_SEC,
+      diskFreeGb,
+      minFreeDiskGb: policy.janitor.minFreeDiskGb,
     });
   };
 

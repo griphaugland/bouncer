@@ -11,6 +11,7 @@ import {
 import { runDaemon } from "./daemon";
 import { preToolHook, promptHook } from "./hooks";
 import { install, uninstall } from "./install";
+import { cleanCommand } from "./janitor";
 import { gatedRun, resolveReal, runCommand } from "./run";
 
 const HELP = `bouncer: makes heavy builds and tests wait their turn so your machine never runs out of memory.
@@ -25,6 +26,7 @@ const HELP = `bouncer: makes heavy builds and tests wait their turn so your mach
                                      run later; output in ~/.bouncer/logs, notifies when done
   bouncer scheduled [--all]          list scheduled jobs
   bouncer unschedule <s-id>          drop a pending scheduled job
+  bouncer clean [--apply <id…>|all]  find disk space; dry run unless --apply
   bouncer install | uninstall        set up / remove daemon, shims and Claude Code hooks
   bouncer daemon                     run the daemon in the foreground
 
@@ -80,6 +82,9 @@ switch (cmd) {
     break;
   case "cancel":
     await cancelCommand(args);
+    break;
+  case "clean":
+    await cleanCommand(args);
     break;
   case "install":
     install();

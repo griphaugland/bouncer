@@ -120,6 +120,8 @@ export interface AdviceInput {
   compilerServerMb: number;
   freePercent: number;
   idleThresholdSec: number;
+  diskFreeGb: number;
+  minFreeDiskGb: number;
 }
 
 /** Plain-language suggestions. Bouncer never closes a session itself: that loses context. */
@@ -140,6 +142,11 @@ export function advise(input: AdviceInput): string[] {
   }
   if (input.compilerServerMb > 500) {
     out.push(`dotnet compiler servers hold ${Math.round(input.compilerServerMb)} MB; Bouncer stops them once dotnet goes idle.`);
+  }
+  if (input.diskFreeGb < input.minFreeDiskGb) {
+    out.push(
+      `Only ${Math.round(input.diskFreeGb)} GB disk free, and macOS swaps to this disk. Run \`bouncer clean\` to see what can go.`,
+    );
   }
   if (input.freePercent < 25 && !idle.length) {
     const top = [...input.sessions].sort((a, b) => b.rssMb - a.rssMb)[0];

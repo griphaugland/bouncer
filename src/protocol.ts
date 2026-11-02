@@ -87,6 +87,8 @@ export interface StatusSnapshot {
     idleSec: number;
   }[];
   advice: string[];
+  /** -1 when unknown. */
+  diskFreeGb: number;
 }
 
 export interface JobRecord {

@@ -71,7 +71,7 @@ export function renderStatus(st: StatusSnapshot): string[] {
   );
   out.push(
     dim(
-      `  slots: ${st.slots.map((s) => `${s.name} ${s.used}/${s.capacity}`).join("  ")}   max ${st.maxConcurrent} at once   jetsam since start: ${st.jetsamSinceStart}`,
+      `  slots: ${st.slots.map((s) => `${s.name} ${s.used}/${s.capacity}`).join("  ")}   max ${st.maxConcurrent} at once   disk ${st.diskFreeGb >= 0 ? `${st.diskFreeGb} GB free` : "?"}   jetsam since start: ${st.jetsamSinceStart}`,
     ),
   );
   if (st.advice.length) {

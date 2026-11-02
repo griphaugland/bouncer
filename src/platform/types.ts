@@ -22,6 +22,8 @@ export interface Proc {
 export interface Platform {
   sampleLoad(): LoadSample;
   listProcesses(): Proc[];
+  /** Free space on the volume that holds user data and swap. */
+  diskFreeGb(): number;
   /** Working directory per pid, for showing which project a session is in. */
   cwdOf(pids: number[]): Map<number, string>;
   /** New out-of-memory kill reports since `sinceMs` (macOS: JetsamEvent files). */

@@ -92,9 +92,12 @@ describe("advise", () => {
       compilerServerMb: 0,
       freePercent: 50,
       idleThresholdSec: 3600,
+      diskFreeGb: 34,
+      minFreeDiskGb: 40,
     });
     expect(out[0]).toContain("1 agent session idle for 1h+ hold 0.9 GB");
     expect(out[1]).toContain("pid 9 is a dotnet build outside Bouncer");
+    expect(out[2]).toContain("Only 34 GB disk free");
   });
 });
 

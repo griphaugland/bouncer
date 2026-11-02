@@ -1,4 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { paths } from "./paths";
 
 export interface Policy {
@@ -24,6 +26,14 @@ export interface Policy {
     /** How long "prioritize this" keeps a session at the front. */
     minutes: number;
   };
+  janitor: {
+    /** Where `bouncer clean` looks for git worktrees. */
+    roots: string[];
+    /** A worktree untouched this long counts as idle. */
+    staleDays: number;
+    /** Below this much free disk, `bouncer status` advises cleaning. macOS swaps to this disk. */
+    minFreeDiskGb: number;
+  };
 }
 
 export const DEFAULT_POLICY: Policy = {
@@ -32,6 +42,7 @@ export const DEFAULT_POLICY: Policy = {
   gate: { yellowFreePercent: 25, redFreePercent: 12 },
   reaper: { cooldownSeconds: 30, compilerServerIdleSeconds: 30, stopGraceSeconds: 10 },
   priority: { minutes: 60 },
+  janitor: { roots: [join(homedir(), "Documents")], staleDays: 14, minFreeDiskGb: 40 },
 };
 
 export const DEFAULT_POLICY_YAML = `# Bouncer policy. The daemon picks up edits within a few seconds.
@@ -60,6 +71,12 @@ reaper:
 
 priority:
   minutes: ${DEFAULT_POLICY.priority.minutes}
+
+# \`bouncer clean\`: where to look for worktrees and when one counts as idle.
+janitor:
+  roots: [${DEFAULT_POLICY.janitor.roots.map((r) => `"${r.replace(homedir(), "~")}"`).join(", ")}]
+  staleDays: ${DEFAULT_POLICY.janitor.staleDays}
+  minFreeDiskGb: ${DEFAULT_POLICY.janitor.minFreeDiskGb}   # below: \`bouncer status\` advises cleaning (macOS swaps to this disk)
 `;
 
 function positive(value: unknown, fallback: number, name: string): number {
@@ -94,6 +111,13 @@ export function parsePolicy(raw: unknown): Policy {
       stopGraceSeconds: positive(r.reaper?.stopGraceSeconds, d.reaper.stopGraceSeconds, "reaper.stopGraceSeconds"),
     },
     priority: { minutes: positive(r.priority?.minutes, d.priority.minutes, "priority.minutes") },
+    janitor: {
+      roots: Array.isArray(r.janitor?.roots)
+        ? r.janitor.roots.map((p: unknown) => String(p).replace(/^~(?=\/|$)/, homedir()))
+        : d.janitor.roots,
+      staleDays: positive(r.janitor?.staleDays, d.janitor.staleDays, "janitor.staleDays"),
+      minFreeDiskGb: positive(r.janitor?.minFreeDiskGb, d.janitor.minFreeDiskGb, "janitor.minFreeDiskGb"),
+    },
   };
   if (policy.gate.redFreePercent >= policy.gate.yellowFreePercent) {
     throw new Error("policy: gate.redFreePercent must be lower than gate.yellowFreePercent");

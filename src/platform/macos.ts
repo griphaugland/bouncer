@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statfsSync, statSync } from "node:fs";
 import type { LoadSample, Platform, Proc } from "./types";
 
 // LC_ALL=C: sysctl and ps format decimals with the user's locale (Eirik's prints "10857,00M").
@@ -56,6 +56,13 @@ export const macos: Platform = {
       });
     }
     return procs;
+  },
+
+  diskFreeGb(): number {
+    // The Data volume holds home and swap; `/` is the read-only system snapshot.
+    const vol = existsSync("/System/Volumes/Data") ? "/System/Volumes/Data" : "/";
+    const s = statfsSync(vol);
+    return (s.bavail * s.bsize) / 1024 ** 3;
   },
 
   cwdOf(pids: number[]): Map<number, string> {

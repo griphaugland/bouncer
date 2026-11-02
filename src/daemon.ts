@@ -454,8 +454,27 @@ export async function runDaemon(): Promise<void> {
   });
   chmodSync(paths.socket, 0o600);
 
+  // An upgrade (brew upgrade, or `bouncer install` of a new version) replaces the binary under a
+  // running daemon. Restart onto it, but only once nothing is running: launchd brings us back.
+  const binaryStamp = () => {
+    try {
+      const st = statSync(paths.binary);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  };
+  const startedStamp = binaryStamp();
+
   const sampleLoop = async () => {
     const now = Date.now();
+    const stamp = startedStamp && binaryStamp();
+    if (stamp && stamp !== startedStamp && sched.active().length === 0) {
+      log("binary was upgraded and nothing is running; restarting onto the new version");
+      // Leave the socket file: clients that see it keep retrying through the restart instead of
+      // failing open. The new daemon replaces it.
+      process.exit(0);
+    }
     try {
       if (existsSync(paths.policy)) {
         const m = statSync(paths.policy).mtimeMs;

@@ -21,8 +21,22 @@ export class Conn {
   closed = false;
 
   /** Returns null when the daemon is not reachable; callers fail open. */
-  static async open(timeoutMs = 1000, socketPath = paths.socket): Promise<Conn | null> {
-    if (!existsSync(socketPath)) return null;
+  /**
+   * `timeoutMs` bounds a connect to a live but slow daemon. `refusedRetryMs` covers the moment a
+   * daemon restarts (after an upgrade): the socket file exists but nothing listens yet, so keep
+   * trying briefly instead of failing open. A daemon that is really gone costs that long once.
+   */
+  static async open(timeoutMs = 1000, socketPath = paths.socket, refusedRetryMs = 0): Promise<Conn | null> {
+    const until = Date.now() + refusedRetryMs;
+    while (true) {
+      if (!existsSync(socketPath)) return null;
+      const conn = await Conn.tryOpen(timeoutMs, socketPath);
+      if (conn || Date.now() >= until) return conn;
+      await Bun.sleep(100);
+    }
+  }
+
+  private static async tryOpen(timeoutMs: number, socketPath: string): Promise<Conn | null> {
     const conn = new Conn();
     try {
       const socket = await withTimeout(

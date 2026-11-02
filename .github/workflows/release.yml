@@ -54,13 +54,39 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: scripts/package.sh
 
+      - name: Render Homebrew formula and cask
+        run: |
+          scripts/homebrew.sh dist/release dist/homebrew-tap
+          cp dist/homebrew-tap/Formula/bouncer.rb dist/release/homebrew-formula-bouncer.rb
+          cp dist/homebrew-tap/Casks/bouncer.rb dist/release/homebrew-cask-bouncer.rb
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="$(awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## \\[?"v {f=1; next} /^## / && f {exit} f' CHANGELOG.md)"
           gh release create "$GITHUB_REF_NAME" dist/release/* --title "Bouncer $GITHUB_REF_NAME" --notes "${notes:-See CHANGELOG.md}"
+
+      # Needs a fine-grained token with contents:write on griphaugland/homebrew-tap. The cask only
+      # ships from signed releases: Homebrew quarantines cask downloads, and macOS blocks an
+      # unsigned, quarantined app on launch.
+      - name: Update Homebrew tap
+        if: ${{ env.HAS_TAP_TOKEN == 'true' }}
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/griphaugland/homebrew-tap.git" "$RUNNER_TEMP/tap"
+          mkdir -p "$RUNNER_TEMP/tap/Formula" "$RUNNER_TEMP/tap/Casks"
+          cp dist/homebrew-tap/Formula/bouncer.rb "$RUNNER_TEMP/tap/Formula/"
+          if [ "$HAS_SIGNING" = "true" ]; then cp dist/homebrew-tap/Casks/bouncer.rb "$RUNNER_TEMP/tap/Casks/"; fi
+          cd "$RUNNER_TEMP/tap"
+          git config user.name "bouncer-release"
+          git config user.email "bouncer-release@users.noreply.github.com"
+          git add -A
+          git commit -m "bouncer ${GITHUB_REF_NAME#v}" || { echo "tap already up to date"; exit 0; }
+          git push
     # Only a yes/no reaches every step; the certificate itself stays in the one step that imports it,
     # so dependency install scripts can never read it.
     env:
       HAS_SIGNING: ${{ secrets.APPLE_CERT_P12 != '' }}
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}

@@ -11,6 +11,8 @@ import { err } from "./term";
 
 const STOP_GRACE_MS = 10_000;
 const GATE_CONNECT_MS = 10_000;
+// Covers a daemon restarting onto an upgraded binary; see Conn.open.
+const RESTART_RETRY_MS = 2_000;
 
 /** Tool rules from the policy; a broken policy file must never stop a build, so fall back. */
 export function safeTools(): ToolRules {
@@ -101,7 +103,7 @@ export async function gatedRun(opts: { tool: string; real: string; args: string[
 
   // A dead daemon refuses instantly, so this long wait only applies to a live but slow one:
   // under memory pressure the daemon may be swapped out, which is exactly when the gate matters.
-  const conn = await Conn.open(GATE_CONNECT_MS);
+  const conn = await Conn.open(GATE_CONNECT_MS, undefined, RESTART_RETRY_MS);
   if (!conn) {
     say("daemon not running, running unguarded");
     return passthrough(real, args);

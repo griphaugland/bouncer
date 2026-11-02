@@ -231,6 +231,17 @@ export function writeShims(): string[] {
   return tools;
 }
 
+/**
+ * `/opt/homebrew/Cellar/bouncer/0.4.0/bin/bouncer` → `/opt/homebrew/opt/bouncer/bin/bouncer`,
+ * the path Homebrew keeps pointing at the current version. Null when not run from Homebrew.
+ */
+export function homebrewStablePath(execPath: string): string | null {
+  const m = execPath.match(/^(.*)\/Cellar\/([^/]+)\/[^/]+\/bin\/([^/]+)$/);
+  if (!m) return null;
+  const stable = `${m[1]}/opt/${m[2]}/bin/${m[3]}`;
+  return existsSync(stable) ? stable : null;
+}
+
 function step(ok: boolean, label: string, detail: string): void {
   console.log(`${ok ? mark.ok() : mark.fail()} ${label.padEnd(9)} ${out.dim(detail.replace(homedir(), "~"))}`);
 }
@@ -246,11 +257,21 @@ export function install(): void {
   mkdirSync(paths.home, { recursive: true, mode: 0o700 });
   chmodSync(paths.home, 0o700);
   mkdirSync(paths.shimDir, { recursive: true });
+  const brew = homebrewStablePath(process.execPath);
   const tmpBin = `${paths.binary}.new`;
-  copyFileSync(process.execPath, tmpBin);
-  chmodSync(tmpBin, 0o755);
-  renameSync(tmpBin, paths.binary);
-  step(true, "binary", paths.binary);
+  rmSync(tmpBin, { force: true });
+  if (brew) {
+    // Link to Homebrew's version-independent path: `brew upgrade` then updates Bouncer in place,
+    // and the daemon restarts itself onto the new binary once it's idle.
+    symlinkSync(brew, tmpBin);
+    renameSync(tmpBin, paths.binary);
+    step(true, "binary", `${paths.binary} → ${brew} (Homebrew)`);
+  } else {
+    copyFileSync(process.execPath, tmpBin);
+    chmodSync(tmpBin, 0o755);
+    renameSync(tmpBin, paths.binary);
+    step(true, "binary", paths.binary);
+  }
 
   if (!existsSync(paths.policy)) {
     writeFileSync(paths.policy, DEFAULT_POLICY_YAML, { mode: 0o600 });

@@ -63,7 +63,7 @@ jobs:
         run: |
           scripts/homebrew.sh dist/release dist/homebrew-tap
           cp dist/homebrew-tap/Formula/bouncer.rb dist/release/homebrew-formula-bouncer.rb
-          cp dist/homebrew-tap/Casks/bouncer.rb dist/release/homebrew-cask-bouncer.rb
+          cp dist/homebrew-tap/Casks/bouncer-app.rb dist/release/homebrew-cask-bouncer-app.rb
 
       - name: Publish GitHub release
         env:
@@ -84,7 +84,11 @@ jobs:
           git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/griphaugland/homebrew-tap.git" "$RUNNER_TEMP/tap"
           mkdir -p "$RUNNER_TEMP/tap/Formula" "$RUNNER_TEMP/tap/Casks"
           cp dist/homebrew-tap/Formula/bouncer.rb "$RUNNER_TEMP/tap/Formula/"
-          if [ "$HAS_SIGNING" = "true" ]; then cp dist/homebrew-tap/Casks/bouncer.rb "$RUNNER_TEMP/tap/Casks/"; fi
+          if [ "$HAS_SIGNING" = "true" ]; then
+            cp dist/homebrew-tap/Casks/bouncer-app.rb "$RUNNER_TEMP/tap/Casks/"
+            cp dist/homebrew-tap/cask_renames.json "$RUNNER_TEMP/tap/"
+            rm -f "$RUNNER_TEMP/tap/Casks/bouncer.rb"  # renamed to bouncer-app in 0.5.1
+          fi
           cd "$RUNNER_TEMP/tap"
           git config user.name "bouncer-release"
           git config user.email "bouncer-release@users.noreply.github.com"

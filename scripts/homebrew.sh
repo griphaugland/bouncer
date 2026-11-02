@@ -3,7 +3,7 @@
 #
 #   scripts/homebrew.sh [release-dir] [tap-dir]
 #     release-dir  default dist/release (needs SHA256SUMS from scripts/package.sh)
-#     tap-dir      default dist/homebrew-tap; writes Formula/bouncer.rb and Casks/bouncer.rb
+#     tap-dir      default dist/homebrew-tap; writes Formula/bouncer.rb, Casks/bouncer-app.rb and cask_renames.json
 #
 # BOUNCER_DOWNLOAD_BASE overrides where Homebrew downloads from (e.g. file:///… for a local test).
 set -eu
@@ -64,8 +64,10 @@ class Bouncer < Formula
 end
 RUBY
 
-cat > "$TAP/Casks/bouncer.rb" <<RUBY
-cask "bouncer" do
+# The cask is "bouncer-app", not "bouncer": a formula and a cask with the same name make every
+# `brew` command on it warn and guess. cask_renames.json moves anyone on the old name across.
+cat > "$TAP/Casks/bouncer-app.rb" <<RUBY
+cask "bouncer-app" do
   version "$VERSION"
   sha256 "$APP"
 
@@ -83,9 +85,11 @@ cask "bouncer" do
 
   caveats <<~EOS
     The menu bar app shows the daemon installed by the bouncer formula. If you haven't yet:
-      bouncer install
+      bouncer setup
   EOS
 end
 RUBY
 
-echo "wrote $TAP/Formula/bouncer.rb and $TAP/Casks/bouncer.rb for v$VERSION"
+printf '{\n  "bouncer": "bouncer-app"\n}\n' > "$TAP/cask_renames.json"
+
+echo "wrote $TAP/Formula/bouncer.rb, $TAP/Casks/bouncer-app.rb and cask_renames.json for v$VERSION"

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0] - 2026-11-02
+
+Setup that fits the machine and the agents on it.
+
+### Added
+- **Guided setup** (`bouncer install`, rerun with `bouncer setup`): scans the Mac, asks which agents to connect and how many sessions you run, shows the plan and every file it will touch, then installs. Esc changes nothing. `--yes` for scripts.
+- **Tuning per machine**: heavy-job limits from RAM and performance cores, minus the measured cost of your agent sessions. `bouncer tune [--apply]` compares and adopts; `doctor` flags a policy that doesn't fit.
+- **Codex**: hooks for "prioritize this" and guardrails, plus a note in `AGENTS.md` (respects `CODEX_HOME` and `AGENTS.override.md`). **Gemini CLI**: a note in `GEMINI.md`. Grok, Cursor Agent, OpenCode, Amp and Aider are detected and queued by the shims.
+- Priority by project folder: "prioritize this" raises every build in that project, whichever process started it.
+- `install.sh` refuses macOS older than 13 before downloading, and gives the wizard the keyboard under `curl | sh`.
+
+### Fixed
+- Tests could edit the real `~/.claude` and `~/.codex`: Bun caches `os.homedir()`, so setting `HOME` in a test didn't isolate it. All home lookups now read `HOME` live, and the test suite runs in a throwaway home it verifies before starting.
+- Backups made within the same second no longer overwrite each other.
+- Terminal wrapper scripts (cmux's) no longer count as installed agents.
+
 ## [0.4.0] - 2026-11-02
 
 Ready for Homebrew.

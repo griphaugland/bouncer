@@ -41,6 +41,17 @@ there is one implementation of the protocol.
 
 ## Decisions
 
+**Fitting the machine.** Setup tiers the heavy-job budget by RAM (under 12 GB: one at a time; 12-24:
+two; 24-36: three; 36-64: four; more: six), caps it at half the performance cores (builds are
+CPU-bound too), and subtracts agent sessions beyond six at the measured ~0.25 GB each. These are
+starting points; every macOS out-of-memory event Bouncer reports is the signal to lower them.
+
+**Agents.** Every agent's builds are queued by the PATH shims. Beyond that, Bouncer uses only what
+each agent documents: Claude Code and Codex hooks (Codex has no background runs, so queued builds
+wait in the foreground there), and plain instruction files for agents without hooks. Codex hooks
+see a different session id than the builds they start, which is why priority also matches by
+project folder.
+
 **Slots and the gate.** Each heavy tool maps to a slot with a capacity (`dotnet 1`, `node 2`, …)
 plus a global `maxConcurrent`. The kernel's pressure level and free-memory percentage give three
 states: *Clear* (slots decide), *Tight* (one heavy job at a time), *Holding the door* (nothing

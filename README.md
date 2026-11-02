@@ -19,7 +19,7 @@ agent: dotnet test ──▶ shim ──▶ bouncerd: slot free and memory OK? �
 - **Queues instead of crashing.** Heavy commands take a slot (`dotnet 1`, `node 2`, `rust 1`, …); the rest wait. Light commands (`git`, `ls`, `dotnet --version`) are never touched.
 - **Gates on real memory pressure**, read from the kernel, not on swap (macOS keeps swap full long after the pressure is gone).
 - **Works with Claude Code out of the box.** A queued command is moved to the background automatically, so it can't hit the Bash tool's timeout, and the agent is told when it finishes.
-- **You set priority, agents can't.** Type "prioritize this" in a Claude Code session, or run `bouncer prioritize <job>`. Bouncer stops the newest normal job, runs yours, then reruns the one it stopped. Its Claude Code hook refuses agents that try to prioritize, cancel or bypass the queue themselves (Codex has no equivalent hook yet; its builds are still queued by the shims).
+- **You set priority, agents can't.** Type "prioritize this" in Claude Code or Codex, or run `bouncer prioritize <job>`. That project's builds go first: Bouncer stops the newest normal job, runs yours, then reruns the one it stopped. Its hooks refuse agents that try to prioritize, cancel or bypass the queue themselves.
 - **Sees what it didn't start.** IDE builds and sessions started before install still count against slots.
 - **Cleans up after .NET.** The Roslyn compiler server (VBCSCompiler) can sit at 10+ GB after a build; Bouncer stops it once dotnet goes idle.
 - **Fails open.** If Bouncer itself is down, builds run as if it weren't installed.
@@ -28,40 +28,55 @@ macOS only for now (Apple Silicon and Intel, macOS 14+). Set `NO_COLOR=1` for pl
 
 ## Install
 
-With Homebrew:
-
 ```sh
-brew install griphaugland/tap/bouncer
-bouncer install                                # daemon, shims, Claude Code hooks
-brew install --cask griphaugland/tap/bouncer   # menu bar app (optional)
+brew install griphaugland/tap/bouncer && bouncer install
 ```
 
-Or with the install script, which verifies every download against the release's SHA-256 checksums:
+or, without Homebrew (verifies every download against the release's SHA-256 checksums):
 
 ```sh
 curl -fsSL https://github.com/griphaugland/bouncer/releases/latest/download/install.sh | sh
 ```
 
-Upgrades (`brew upgrade`, or re-running the script) apply on their own: the daemon restarts onto
-the new version as soon as no build is running.
+`bouncer install` is a short guided setup:
 
-`bouncer install` sets up:
+```text
+Bouncer 0.5.0  queues heavy builds so your agents can share this Mac
 
-| What | Where |
-|---|---|
-| `bouncer` binary and daemon (launchd, starts at login) | `~/.bouncer/`, `~/Library/LaunchAgents/com.bouncer.daemon.plist` |
-| Shims for `dotnet pnpm npm npx yarn xcodebuild cargo go swift gradle mvn docker` | `~/.bouncer/bin`, added to the end of `~/.zshrc` (zsh) or `~/.bash_profile` (bash), created if missing |
-| Claude Code hooks + a status segment in your statusline | `~/.claude/settings.json` (and `$CLAUDE_CONFIG_DIR`) |
-| cmux Dock control (if you use cmux) | `~/.config/cmux/dock.json` |
-| Menu bar app (install script only; skip with `--no-app`) | `~/Applications/Bouncer.app` |
+  This Mac   MacBook Pro · Apple M3 Pro · 18 GB · 12 cores · macOS 26.7
+  Toolchains dotnet pnpm npm npx xcodebuild swift
+  Agents     Claude Code, Codex
 
-Every file it edits is backed up first as `*.bak-bouncer-<timestamp>`. Open a new terminal, restart your agent sessions, then:
+✓ Agents  Claude Code, Codex
+✓ Sessions  9-15
 
-```sh
-bouncer doctor
+The plan  for 18 GB and ~12 agent sessions
+  2 heavy jobs at once  dotnet 1 · node 2 · xcode 1
+  one at a time below 25% free memory, nothing new below 12%
 ```
 
-From source: `bun install && bun run install-local` (needs [Bun](https://bun.sh) 1.3+).
+1. **Scans the Mac**: chip, memory, cores, macOS, which toolchains and agents are installed.
+2. **Connects your agents.** Every agent's builds are queued by the PATH shims; on top of that,
+   each gets what its own tooling supports:
+
+   | Agent | What Bouncer adds |
+   |---|---|
+   | Claude Code | queued builds run in the background (no Bash-tool timeouts), "prioritize this", guardrails, statusline |
+   | Codex | "prioritize this" and guardrails via hooks, a short note in `AGENTS.md`; trust the hooks once in `/hooks` |
+   | Gemini CLI | a short note in `GEMINI.md` on how the queue works |
+   | Grok, Cursor Agent, OpenCode, Amp, Aider | builds queued by the shims |
+
+3. **Tunes the limits** to the machine and how many agent sessions you run: an 8 GB Air gets one
+   heavy job at a time, a 64 GB Mac Studio six. The reasons are written into `~/.bouncer/policy.yaml`.
+4. **Shows every file it will touch**, backs each one up first, and installs.
+
+Run it again any time with `bouncer setup`. Scripts and CI: `bouncer install --yes` (uses saved or
+detected choices, never rewrites an existing policy). Upgrades (`brew upgrade`, or re-running the
+script) apply on their own: the daemon restarts onto the new version as soon as no build is running.
+
+The menu bar app: `brew install --cask griphaugland/tap/bouncer` (the install script includes it;
+skip with `--no-app`). From source: `bun install && bun run install-local` (Bun 1.3+). Requires
+macOS 13 or later (the menu bar app, 14).
 
 ## Use
 
@@ -80,13 +95,15 @@ bouncer clean                  # dry run: what disk space can safely go
 bouncer clean --apply pnpm-store worktree-build-output
 
 BOUNCER_BYPASS=1 dotnet test   # skip the gate once
-bouncer doctor                 # checks install, PATH, hooks and daemon; prints the fix for each problem
+bouncer doctor                 # checks install, PATH, agents and daemon; prints the fix for each problem
+bouncer setup                  # change connected agents, sessions, extras
+bouncer tune [--apply]         # re-scan this Mac and compare with your limits
 bouncer uninstall [--purge]    # remove everything (--purge also deletes history)
 ```
 
 ## Configure
 
-`~/.bouncer/policy.yaml` is created on install and reloads on save.
+`~/.bouncer/policy.yaml` is written by setup, tuned for your Mac, and reloads on save.
 
 ```yaml
 maxConcurrent: 2          # heavy jobs at once, across all slots
@@ -129,6 +146,7 @@ See [SECURITY.md](SECURITY.md).
 bun install
 bun run check        # typecheck + lint + all tests (unit, daemon integration, compiled binary)
 scripts/package.sh && scripts/e2e-fresh-install.sh   # install as a brand-new user, then uninstall
+scripts/e2e-wizard.sh                                # drive the setup wizard through a real terminal
 BOUNCER_HOME=/tmp/bh bun src/main.ts daemon   # isolated daemon; nothing touches ~/.bouncer
 menubar/build.sh     # menu bar app → ~/Applications/Bouncer.app
 ```

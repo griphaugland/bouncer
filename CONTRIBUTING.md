@@ -40,17 +40,35 @@ BOUNCER_HOME=/tmp/bh bun src/main.ts status
 - **Agents never get more power than the human.** Anything that reorders or bypasses the queue goes in `HUMAN_ONLY` in `src/hooks.ts`.
 - **The protocol is versioned** (`PROTOCOL_VERSION` in `src/protocol.ts`). Additive changes only within a version.
 - Bug fixes come with a test that fails without the fix.
-- Menu bar UI: render it with `BouncerBar --snapshot <dir> --status-file docs/demo-status.json` and look at both PNGs before opening a PR.
+- Menu bar UI: render every state with `BouncerBar --snapshot <dir> --status-file <fixture>` (`docs/demo-status*.json`, `not-running`, `not-installed`) and look at light and dark before opening a PR. Context: `.impeccable.md`.
+- CLI output goes through `src/term.ts`; never write ANSI codes directly.
 
 ## Releasing
 
-1. Bump `version` in `package.json`, add a `## [x.y.z]` section to `CHANGELOG.md`.
-2. Tag `vx.y.z` and push the tag. `.github/workflows/release.yml` checks the tag matches, runs every check, builds both architectures and the universal app, signs and notarizes when the secrets below exist, and publishes the GitHub release with `SHA256SUMS`.
+1. Bump `version` in `package.json` and add a `## [x.y.z]` section to `CHANGELOG.md`.
+2. Locally: `bun run check && scripts/package.sh && scripts/e2e-fresh-install.sh && E2E_SHELL=bash scripts/e2e-fresh-install.sh`.
+3. Tag `vx.y.z` and push the tag. `.github/workflows/release.yml` checks the tag matches, runs every check, builds both architectures and the universal app, signs and notarizes when the secrets exist, publishes the GitHub release with `SHA256SUMS`, attaches the rendered Homebrew formula and cask, and pushes them to the tap when `HOMEBREW_TAP_TOKEN` exists.
 
-Signing secrets (repository → Settings → Secrets → Actions), all optional:
+Repository secrets (Settings → Secrets → Actions), all optional:
 
 | Secret | What |
 |---|---|
 | `APPLE_CERT_P12` | Developer ID Application certificate + key, exported as .p12, base64-encoded |
 | `APPLE_CERT_PASSWORD` | password of that .p12 |
 | `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD` | notarytool credentials (an app-specific password) |
+| `HOMEBREW_TAP_TOKEN` | fine-grained token with Contents: read and write on `griphaugland/homebrew-tap` |
+
+**The cask is only published from signed releases.** Homebrew quarantines cask downloads, and
+macOS blocks an unsigned, quarantined app on first launch. The formula (CLI) is unaffected.
+
+Test the Homebrew path locally against unpublished artifacts:
+
+```sh
+scripts/package.sh
+BOUNCER_DOWNLOAD_BASE="file://$PWD/dist/release" scripts/homebrew.sh dist/release dist/homebrew-test
+brew tap-new --no-git bouncertest/local
+cp dist/homebrew-test/Formula/bouncer.rb "$(brew --repo bouncertest/local)/Formula/"
+brew install bouncertest/local/bouncer && brew test bouncertest/local/bouncer
+scripts/e2e-homebrew.sh
+brew uninstall bouncertest/local/bouncer && brew untap bouncertest/local
+```

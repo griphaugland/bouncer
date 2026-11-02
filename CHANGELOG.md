@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0] - 2026-11-02
+
+Ready for Homebrew.
+
+### Added
+- Homebrew formula (CLI + daemon) and cask (menu bar app), generated from each release's checksums and pushed to `griphaugland/homebrew-tap` by the release workflow.
+- Upgrades apply on their own: the daemon restarts onto a new binary as soon as no build is running. Homebrew installs link to the version-independent `opt` path.
+- `NO_COLOR` / `FORCE_COLOR` support; one visual language across `status`, `doctor`, `clean`, `install` and the menu bar.
+- Menu bar: the icon is a dial (it read as a loading spinner), a native footer, a "not set up" view with a copyable install command.
+- `scripts/e2e-fresh-install.sh` (zsh and bash) and `scripts/e2e-homebrew.sh`: install as a brand-new user, use, uninstall, verify nothing is left. The fresh-install test runs in CI.
+
+### Fixed
+- On a new Mac account there is no `~/.zshrc`, so the PATH line was never written and nothing was gated. The login shell's startup file is now created (`~/.bash_profile` for bash, which is what macOS login shells read).
+- `bouncer install` exits non-zero when the daemon doesn't start.
+- The agent guard only reacts to commands that actually run `bouncer`; text that merely mentions them (heredocs, quoted strings) no longer trips it.
+- `bouncer clean` no longer counts the whole pnpm store as reclaimable.
+- During a daemon restart, clients retry for 2 s instead of running a build unguarded.
+- A test or custom-home install gets its own launchd job and never replaces the real daemon.
+- Release binaries carry a real code-signing identifier (`com.bouncer.cli`).
+
 ## [0.3.0] - 2026-11-02
 
 First release for other people.

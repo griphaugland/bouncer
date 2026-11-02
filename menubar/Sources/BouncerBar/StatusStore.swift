@@ -50,6 +50,12 @@ final class StatusStore {
         }
     }
 
+    /// Show an error state instead of the live one (design QA).
+    func simulate(problem: String) {
+        status = nil
+        self.problem = problem
+    }
+
     /// Show a recorded status instead of the live one (README screenshots, design QA).
     func load(fixture url: URL) throws {
         status = try JSONDecoder().decode(Status.self, from: Data(contentsOf: url))

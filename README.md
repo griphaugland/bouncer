@@ -5,7 +5,10 @@
 When several agents start `dotnet test`, `pnpm build` or `cargo build` at the same moment, macOS runs out of memory, starts killing processes, and your terminal (with every agent session in it) goes down. Bouncer sits at the door: heavy builds and tests wait in line for a free slot, memory pressure decides how many may run at once, and nothing ever gets denied, only delayed.
 
 <p align="center">
-  <img src="docs/images/popover-light.png" width="380" alt="Bouncer's menu bar popover: memory 23% free, one dotnet test and one pnpm build running, two jobs waiting with the reason, four agent sessions listed">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/popover-demo-dark.png">
+    <img src="docs/images/popover-demo-light.png" width="380" alt="Bouncer's menu bar popover: memory 23% free, one dotnet test and one pnpm build running, two jobs waiting with the reason, four agent sessions listed">
+  </picture>
 </p>
 
 ```text
@@ -21,23 +24,36 @@ agent: dotnet test ──▶ shim ──▶ bouncerd: slot free and memory OK? �
 - **Cleans up after .NET.** The Roslyn compiler server (VBCSCompiler) can sit at 10+ GB after a build; Bouncer stops it once dotnet goes idle.
 - **Fails open.** If Bouncer itself is down, builds run as if it weren't installed.
 
-macOS only for now (Apple Silicon and Intel, macOS 14+).
+macOS only for now (Apple Silicon and Intel, macOS 14+). Set `NO_COLOR=1` for plain output.
 
 ## Install
+
+With Homebrew:
+
+```sh
+brew install griphaugland/tap/bouncer
+bouncer install                                # daemon, shims, Claude Code hooks
+brew install --cask griphaugland/tap/bouncer   # menu bar app (optional)
+```
+
+Or with the install script, which verifies every download against the release's SHA-256 checksums:
 
 ```sh
 curl -fsSL https://github.com/griphaugland/bouncer/releases/latest/download/install.sh | sh
 ```
 
-The installer verifies every download against the release's SHA-256 checksums, then installs:
+Upgrades (`brew upgrade`, or re-running the script) apply on their own: the daemon restarts onto
+the new version as soon as no build is running.
+
+`bouncer install` sets up:
 
 | What | Where |
 |---|---|
 | `bouncer` binary and daemon (launchd, starts at login) | `~/.bouncer/`, `~/Library/LaunchAgents/com.bouncer.daemon.plist` |
-| Shims for `dotnet pnpm npm npx yarn xcodebuild cargo go swift gradle mvn docker` | `~/.bouncer/bin`, added to the end of `~/.zshrc` / `~/.bashrc` |
+| Shims for `dotnet pnpm npm npx yarn xcodebuild cargo go swift gradle mvn docker` | `~/.bouncer/bin`, added to the end of `~/.zshrc` (zsh) or `~/.bash_profile` (bash), created if missing |
 | Claude Code hooks + a status segment in your statusline | `~/.claude/settings.json` (and `$CLAUDE_CONFIG_DIR`) |
 | cmux Dock control (if you use cmux) | `~/.config/cmux/dock.json` |
-| Menu bar app (skip with `--no-app`) | `~/Applications/Bouncer.app` |
+| Menu bar app (install script only; skip with `--no-app`) | `~/Applications/Bouncer.app` |
 
 Every file it edits is backed up first as `*.bak-bouncer-<timestamp>`. Open a new terminal, restart your agent sessions, then:
 
@@ -64,6 +80,7 @@ bouncer clean                  # dry run: what disk space can safely go
 bouncer clean --apply pnpm-store worktree-build-output
 
 BOUNCER_BYPASS=1 dotnet test   # skip the gate once
+bouncer doctor                 # checks install, PATH, hooks and daemon; prints the fix for each problem
 bouncer uninstall [--purge]    # remove everything (--purge also deletes history)
 ```
 
@@ -95,7 +112,7 @@ bouncer CLI / menu bar app ───┘      connection = lease         ├─ s
                                                                 └─ jobs.db (history)
 ```
 
-A shim asks the daemon for a slot, waits its turn, runs the real tool, and reports back. Its connection is the lease: if it dies, the slot frees. Nested calls inside a job (`pnpm` → `pnpm`, `dotnet test` → `dotnet`) pass straight through. Design notes: [`docs/spec.md`](docs/spec.md).
+A shim asks the daemon for a slot, waits its turn, runs the real tool, and reports back. Its connection is the lease: if it dies, the slot frees. Nested calls inside a job (`pnpm` → `pnpm`, `dotnet test` → `dotnet`) pass straight through. Design notes: [`docs/design.md`](docs/design.md).
 
 ## Safety
 
@@ -111,6 +128,7 @@ See [SECURITY.md](SECURITY.md).
 ```sh
 bun install
 bun run check        # typecheck + lint + all tests (unit, daemon integration, compiled binary)
+scripts/package.sh && scripts/e2e-fresh-install.sh   # install as a brand-new user, then uninstall
 BOUNCER_HOME=/tmp/bh bun src/main.ts daemon   # isolated daemon; nothing touches ~/.bouncer
 menubar/build.sh     # menu bar app → ~/Applications/Bouncer.app
 ```

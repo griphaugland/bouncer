@@ -136,13 +136,14 @@ export function advise(input: AdviceInput): string[] {
   if (idle.length) {
     const mb = idle.reduce((s, x) => s + x.rssMb, 0);
     const hours = Math.round(input.idleThresholdSec / 3600);
+    const n = idle.length;
     out.push(
-      `${idle.length} agent session${idle.length > 1 ? "s" : ""} idle for ${hours}h+ hold ${(mb / 1024).toFixed(1)} GB. Closing them is the biggest win (see Sessions below).`,
+      `${n} session${n > 1 ? "s" : ""} idle for ${hours}h+ ${n > 1 ? "hold" : "holds"} ${(mb / 1024).toFixed(1)} GB. Closing ${n > 1 ? "them" : "it"} frees the most.`,
     );
   }
   for (const e of input.external) {
     out.push(
-      `A ${e.slot} build Bouncer didn't start is using ${mbText(e.rssMb)} (pid ${e.pid}). Restart the session that runs it so its builds queue.`,
+      `An outside ${e.slot} build is using ${mbText(e.rssMb)}. Restart the session that started it so its builds queue.`,
     );
   }
   if (input.compilerServerMb > 500) {
@@ -152,7 +153,7 @@ export function advise(input: AdviceInput): string[] {
   }
   if (input.diskFreeGb < input.minFreeDiskGb) {
     out.push(
-      `Only ${Math.round(input.diskFreeGb)} GB disk free, and macOS swaps to this disk. Run \`bouncer clean\` to see what can go.`,
+      `Only ${Math.round(input.diskFreeGb)} GB disk free, and macOS swaps to it. \`bouncer clean\` shows what can go.`,
     );
   }
   if (input.freePercent < 25 && !idle.length) {

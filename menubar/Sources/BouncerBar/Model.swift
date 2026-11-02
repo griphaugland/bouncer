@@ -34,7 +34,7 @@ enum Load: String, Decodable, Sendable {
         switch self {
         case .green: "Builds start as soon as their slot is free."
         case .yellow: "Memory is getting low. One heavy job at a time."
-        case .red: "Memory is critical. Nothing new starts; the newest job was stopped."
+        case .red: "Memory is critical. Nothing new starts; normal jobs are stopped, newest first."
         }
     }
 }

@@ -5,6 +5,7 @@
 ### Fixed
 - Installing with Homebrew on a Mac that already had Bouncer left the daemon on the old copy: `bouncer` on PATH resolved to that copy, so setup kept it and `brew upgrade` never reached the daemon. Setup now adopts Homebrew's binary, and `doctor` warns when the two have drifted. Run `bouncer setup` once to fix an existing install.
 - Menu bar app: with every toolchain installed (seven slots) the slot row truncated to "do…"; slots now sit in a grid and swap/disk get their own line. Session folder names get the free width instead of "Pro…esign".
+- The menu bar cask is now `bouncer-app`: sharing the formula's name made `brew upgrade bouncer` warn and guess. The tap's `cask_renames.json` moves existing installs across.
 - `doctor` showed the Codex "/hooks" instruction with a ✓; it's now a note.
 
 ## [0.5.0] - 2026-11-02

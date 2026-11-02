@@ -24,7 +24,9 @@ const HELP = `bouncer ${VERSION}: makes heavy builds and tests wait their turn s
   bouncer history [n]                last n finished jobs
   bouncer prioritize <job|session>   move a session's jobs to the front (--clear to undo)
   bouncer cancel <job>               stop a queued or running job
-  bouncer run [--slot s] -- <cmd>    run any command through the gate
+  bouncer run [--slot s] [--restartable] -- <cmd>
+                                     run any command through the gate (--restartable: safe to
+                                     stop and rerun when a prioritized job needs the slot)
   bouncer schedule [--at 02:00 | --in 30m] [--when-idle] -- <cmd>
                                      run later; output in ~/.bouncer/logs, notifies when done
   bouncer scheduled [--all]          list scheduled jobs

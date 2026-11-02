@@ -98,7 +98,16 @@ describe("daemon + clients", () => {
   test("a prioritized session preempts a running job, which reruns afterwards", async () => {
     const log = join(home, "preempt.log");
     const a = bouncer(
-      ["run", "--slot", "t", "--", "sh", "-c", `echo a-start >> ${log}; sleep 3; echo a-end >> ${log}`],
+      [
+        "run",
+        "--slot",
+        "t",
+        "--restartable",
+        "--",
+        "sh",
+        "-c",
+        `echo a-start >> ${log}; sleep 3; echo a-end >> ${log}`,
+      ],
       {
         BOUNCER_SESSION: "slow",
       },
@@ -109,6 +118,28 @@ describe("daemon + clients", () => {
     expect(await b.exited).toBe(0);
     expect(await a.exited).toBe(0);
     expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["a-start", "b-ran", "a-start", "a-end"]);
+  }, 15_000);
+
+  test("a command that isn't safe to rerun is never preempted (review #8)", async () => {
+    const log = join(home, "migration.log");
+    const a = bouncer(["run", "--slot", "t", "--", "sh", "-c", `echo start >> ${log}; sleep 2; echo end >> ${log}`]);
+    await waitFor(() => existsSync(log));
+    expect((await output(["prioritize", "urgent"])).code).toBe(0);
+    const b = bouncer(["run", "--slot", "t", "--", "true"], { BOUNCER_SESSION: "urgent" });
+    expect(await b.exited).toBe(0);
+    await a.exited;
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["start", "end"]);
+  }, 15_000);
+
+  test("a command that isn't safe to rerun is never preempted (review #8)", async () => {
+    const log = join(home, "migration.log");
+    const a = bouncer(["run", "--slot", "t", "--", "sh", "-c", `echo start >> ${log}; sleep 2; echo end >> ${log}`]);
+    await waitFor(() => existsSync(log));
+    expect((await output(["prioritize", "urgent"])).code).toBe(0);
+    const b = bouncer(["run", "--slot", "t", "--", "true"], { BOUNCER_SESSION: "urgent" });
+    expect(await b.exited).toBe(0);
+    await a.exited;
+    expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["start", "end"]);
   }, 15_000);
 
   test("a client that dies releases its slot", async () => {
@@ -198,4 +229,31 @@ test("a stale socket with no daemon behind it fails open immediately, not after 
   expect((await new Response(p.stdout).text()).trim()).toBe("ran");
   expect(Date.now() - started).toBeLessThan(3000);
   rmSync(stale, { recursive: true, force: true });
+});
+
+test("a broken policy.yaml never stops the daemon: it runs on defaults and says so", async () => {
+  const broken = mkdtempSync(join(tmpdir(), "bouncer-badpolicy-"));
+  writeFileSync(join(broken, "policy.yaml"), "maxConcurrent: lots\nslots: [unterminated\n");
+  const env = { ...(process.env as Record<string, string>), BOUNCER_HOME: broken, BOUNCER_LOAD_OVERRIDE: "green" };
+  const d = Bun.spawn([process.execPath, MAIN, "daemon"], { env, stdout: "ignore", stderr: "ignore" });
+  try {
+    const sock = join(broken, "bouncer.sock");
+    const until = Date.now() + 8000;
+    while (!existsSync(sock) && Date.now() < until) await Bun.sleep(50);
+    expect(existsSync(sock)).toBe(true);
+    const r = Bun.spawnSync([process.execPath, MAIN, "status", "--json"], { env, stdout: "pipe" });
+    const status = JSON.parse(r.stdout.toString());
+    expect(status.advice[0]).toContain("policy.yaml is invalid");
+    const job = Bun.spawnSync([process.execPath, MAIN, "run", "--slot", "t", "--", "echo", "gated"], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(job.stdout.toString().trim()).toBe("gated");
+    expect(job.stderr.toString()).not.toContain("unguarded");
+  } finally {
+    d.kill();
+    await d.exited;
+    rmSync(broken, { recursive: true, force: true });
+  }
 });

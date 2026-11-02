@@ -93,6 +93,9 @@ export function findWorktrees(roots: string[], maxDepth = 5): Worktree[] {
         ?.trim();
       if (!pointer) continue;
       const gitdir = resolve(path, pointer);
+      // A .git file also marks a submodule (gitdir under .git/modules/): not a worktree, and
+      // rarely "touched", so it would always look idle (review #6).
+      if (/\/\.git\/modules\//.test(gitdir)) continue;
       let last = 0;
       for (const f of ["index", "HEAD", "logs/HEAD"]) {
         try {
@@ -151,10 +154,22 @@ function largestUntracked(worktree: string, lines: string[]): { path: string; by
   return best && best.bytes >= 1024 ** 3 ? best : null;
 }
 
-async function activeSessionDirs(): Promise<string[]> {
-  const reply = await ask({ op: "status" }, 1500);
-  if (reply?.type !== "status") return [];
-  return reply.status.sessions.map((s) => s.cwd).filter((c): c is string => !!c);
+/**
+ * Folders where work is happening right now: agent sessions and Bouncer jobs. Null when the
+ * daemon can't be asked, which callers must treat as "unknown", never as "nothing".
+ */
+async function liveDirs(): Promise<string[] | null> {
+  const reply = await ask({ op: "status" }, 5000);
+  if (reply?.type !== "status") return null;
+  const st = reply.status;
+  return [...st.sessions.map((s) => s.cwd), ...st.running.map((j) => j.cwd), ...st.queued.map((j) => j.cwd)].filter(
+    (c): c is string => !!c,
+  );
+}
+
+/** A worktree is in use if live work is inside it, or it is inside a folder with live work. */
+export function inUse(worktree: string, live: string[]): boolean {
+  return live.some((d) => d === worktree || d.startsWith(`${worktree}/`) || worktree.startsWith(`${d}/`));
 }
 
 function categories(staleWorktrees: Worktree[]): Category[] {
@@ -244,11 +259,16 @@ export async function cleanCommand(args: string[]): Promise<void> {
   const now = Date.now();
 
   process.stderr.write(dim("Scanning caches and worktrees…\n"));
-  const sessionDirs = await activeSessionDirs();
+  const live = await liveDirs();
+  if (live === null && apply) {
+    console.error(
+      `bouncer: can't reach the daemon to check which folders agents are working in, so nothing will be deleted. Start it (bouncer doctor) and try again.`,
+    );
+    process.exit(1);
+  }
   const worktrees = findWorktrees(policy.janitor.roots);
   const staleMs = policy.janitor.staleDays * 86_400_000;
-  const inUse = (w: Worktree) => sessionDirs.some((d) => d === w.path || d.startsWith(`${w.path}/`));
-  const stale = worktrees.filter((w) => now - w.lastActivity >= staleMs && !inUse(w));
+  const stale = worktrees.filter((w) => now - w.lastActivity >= staleMs && !inUse(w.path, live ?? []));
 
   const results: { cat: Category; bytes: number; detail?: string; targets?: string[] }[] = [];
   for (const cat of categories(stale)) {

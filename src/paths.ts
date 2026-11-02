@@ -22,6 +22,8 @@ export const paths = {
   binary: join(home, "bouncer"),
   log: join(home, "daemon.log"),
   jobLogs: join(home, "logs"),
+  /** Where an upgrade comes from (Homebrew's version-independent binary), if anywhere. */
+  source: join(home, "source"),
 };
 
 /** The account's real home from the user database. Unlike os.homedir(), ignores $HOME. */

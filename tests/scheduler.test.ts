@@ -199,3 +199,23 @@ describe("priority by project folder", () => {
     expect(j.priority).toBe("normal");
   });
 });
+
+describe("jobs that must not be restarted (review #8)", () => {
+  test("are never preempted, even for a prioritized session", () => {
+    const s = new Scheduler(policy);
+    const migration = s.enqueue({ ...job("dotnet", "a", "dotnet ef database update"), preemptible: false }, 0);
+    s.tick(0);
+    s.prioritizeSession("b", 1);
+    s.enqueue(job("dotnet", "b"), 1);
+    expect(s.tick(2).filter((a) => a.type === "preempt")).toEqual([]);
+    expect(migration.state).toBe("running");
+  });
+
+  test("are never reaped when memory is critical", () => {
+    const s = new Scheduler(policy);
+    s.enqueue({ ...job("node", "a", "pnpm install"), preemptible: false }, 0);
+    s.tick(0);
+    s.load = "red";
+    expect(s.tick(60_000)).toEqual([]);
+  });
+});

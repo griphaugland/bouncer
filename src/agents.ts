@@ -69,6 +69,14 @@ function withoutBouncer(groups: Group[] | undefined): Group[] {
     .filter((g) => g.hooks.length > 0);
 }
 
+/**
+ * A hook must never break the agent, even if Bouncer's binary is gone (e.g. removed by
+ * `brew uninstall` before `bouncer uninstall`): then it exits 0 silently.
+ */
+function hookCommand(kind: "pre-tool" | "prompt", agentFlag: string): string {
+  return `"${paths.binary}" hook ${kind}${agentFlag} 2>/dev/null || true`;
+}
+
 function setHooks(hooks: Record<string, Group[]>, agentFlag: string, add: boolean): Record<string, Group[]> {
   const next = { ...hooks };
   next.PreToolUse = withoutBouncer(next.PreToolUse);
@@ -76,10 +84,10 @@ function setHooks(hooks: Record<string, Group[]>, agentFlag: string, add: boolea
   if (add) {
     next.PreToolUse.push({
       matcher: "Bash",
-      hooks: [{ type: "command", command: `"${paths.binary}" hook pre-tool${agentFlag}`, timeout: 5 }],
+      hooks: [{ type: "command", command: hookCommand("pre-tool", agentFlag), timeout: 5 }],
     });
     next.UserPromptSubmit.push({
-      hooks: [{ type: "command", command: `"${paths.binary}" hook prompt${agentFlag}`, timeout: 5 }],
+      hooks: [{ type: "command", command: hookCommand("prompt", agentFlag), timeout: 5 }],
     });
   }
   for (const key of ["PreToolUse", "UserPromptSubmit"]) if (!next[key]?.length) delete next[key];
@@ -92,11 +100,25 @@ function hasBouncerHooks(hooks: Record<string, Group[]> | undefined): boolean {
 
 // --- Claude Code -------------------------------------------------------------------------------
 
-/** The default profile plus CLAUDE_CONFIG_DIR. A Claude Code that was never configured gets a settings file. */
+/** Settings files install edited, recorded so uninstall finds them from any shell (review #5). */
+function rememberedClaudeFiles(): string[] {
+  try {
+    return (readJson(join(paths.home, "setup.json")).claudeSettings as string[] | undefined) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The default profile, CLAUDE_CONFIG_DIR, and any profile an earlier install edited. A Claude
+ * Code that was never configured gets a settings file.
+ */
 export function claudeSettingsFiles(): string[] {
   const dirs = new Set([join(userHome(), ".claude")]);
   if (process.env.CLAUDE_CONFIG_DIR) dirs.add(process.env.CLAUDE_CONFIG_DIR);
-  return [...dirs].filter((d) => existsSync(d)).map((d) => join(d, "settings.json"));
+  const files = [...dirs].filter((d) => existsSync(d)).map((d) => join(d, "settings.json"));
+  for (const f of rememberedClaudeFiles()) if (existsSync(f) && !files.includes(f)) files.push(f);
+  return files;
 }
 
 // Appended verbatim to an existing statusLine command, so uninstall can strip exactly this.
@@ -152,8 +174,13 @@ function editCodex(add: boolean): string[] {
     writeJson(file, config);
     changed.push(file);
   }
-  if (setBlock(codexInstructionsFile(), BLOCK_START, BLOCK_END, add ? AGENT_NOTE : null)) {
-    changed.push(codexInstructionsFile());
+  if (add) {
+    if (setBlock(codexInstructionsFile(), BLOCK_START, BLOCK_END, AGENT_NOTE)) changed.push(codexInstructionsFile());
+  } else {
+    // Which file Codex reads may have changed since install: clean both (review #5).
+    for (const f of [join(codexHome(), "AGENTS.md"), join(codexHome(), "AGENTS.override.md")]) {
+      if (setBlock(f, BLOCK_START, BLOCK_END, null)) changed.push(f);
+    }
   }
   return changed;
 }

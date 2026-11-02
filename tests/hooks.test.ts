@@ -10,6 +10,13 @@ test.each([
   "bouncer clean --apply all",
   "launchctl bootout gui/501/com.bouncer.daemon",
   "export BOUNCER_BYPASS=1; dotnet test",
+  // Review finding #4: other variables and nested shells.
+  "BOUNCER_JOB=1 dotnet build",
+  "BOUNCER_SESSION=abc123 pnpm test",
+  "BOUNCER_HOME=/tmp/nowhere dotnet test",
+  "bash -c 'BOUNCER_BYPASS=1 pnpm build'",
+  'sh -c "bouncer cancel 4"',
+  "zsh -c 'cd web && BOUNCER_JOB=x pnpm build && echo ok'",
   "time env BOUNCER_BYPASS=1 pnpm build",
 ])("agents may not: %s", (cmd) => expect(humanOnlyReason(cmd)).toContain("reserved for the user"));
 
@@ -27,3 +34,20 @@ test.each([
   'echo "use BOUNCER_BYPASS=1 to skip"',
   "git commit -m 'document bouncer uninstall'",
 ])("agents may: %s", (cmd) => expect(humanOnlyReason(cmd)).toBeNull());
+
+import { PRIORITIZE } from "../src/hooks";
+
+test.each([
+  "prioritize this",
+  "Please prioritize this, I need the result",
+  "prioritise it",
+  "can you prioritize these tests",
+  "prioriter dette",
+])("prioritizes: %s", (prompt) => expect(PRIORITIZE.test(prompt)).toBe(true));
+
+test.each([
+  "prioritize readability over cleverness",
+  "what should we prioritize next quarter?",
+  'Preemption is easy to trigger: any prompt containing prioritize, such as "prioritize readability"',
+  "the priority list",
+])("does not prioritize: %s", (prompt) => expect(PRIORITIZE.test(prompt)).toBe(false));

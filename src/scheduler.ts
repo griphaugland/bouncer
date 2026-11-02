@@ -21,6 +21,8 @@ export interface Job {
   peakRssMb: number;
   rssMb: number;
   preemptCount: number;
+  /** False for jobs that must not be killed halfway: never preempted, never reaped. */
+  preemptible: boolean;
   exitCode?: number;
   waitReason?: string;
 }
@@ -53,9 +55,10 @@ export class Scheduler {
     private nextId = 1,
   ) {}
 
-  enqueue(input: { slot: string; session: string; cwd: string; cmd: string }, now: number): Job {
+  enqueue(input: { slot: string; session: string; cwd: string; cmd: string; preemptible?: boolean }, now: number): Job {
     const job: Job = {
       ...input,
+      preemptible: input.preemptible ?? true,
       id: this.nextId++,
       priority: this.isPrioritized(input.session, now, input.cwd) ? "high" : "normal",
       state: "queued",
@@ -266,7 +269,7 @@ export class Scheduler {
     }
 
     if (this.load === "red" && now - this.lastReapAt >= this.policy.reaper.cooldownSeconds * 1000) {
-      const victim = newest(running.filter((j) => j.priority === "normal" && !j.stopping));
+      const victim = newest(running.filter((j) => j.priority === "normal" && !j.stopping && j.preemptible));
       if (victim) {
         victim.stopping = "reap";
         victim.stoppingSince = now;
@@ -282,7 +285,7 @@ export class Scheduler {
     const relevant = running.filter((r) => (slotFull ? r.slot === job.slot : true));
     // Something is already being stopped to make this room; wait for it instead of killing more.
     if (relevant.some((r) => r.stopping === "preempt")) return undefined;
-    return newest(relevant.filter((r) => r.priority === "normal" && !r.stopping));
+    return newest(relevant.filter((r) => r.priority === "normal" && !r.stopping && r.preemptible));
   }
 }
 

@@ -16,7 +16,7 @@ const p = (pid: number, ppid: number, command: string, rssKb = 1024, extra: Part
 describe("heavySlotOfProcess", () => {
   test.each([
     ["/opt/homebrew/bin/dotnet test", "dotnet"],
-    ["dotnet run --project src/Api", "dotnet"],
+    ["dotnet build src/Api", "dotnet"],
     ["node /opt/homebrew/bin/pnpm test", "node"],
     ["node /Users/x/.nvm/versions/node/v22/lib/node_modules/npm/bin/npm-cli.js run build", "node"],
     ["node /repo/node_modules/vitest/vitest.mjs run", "node"],
@@ -33,6 +33,8 @@ describe("heavySlotOfProcess", () => {
     "node /repo/node_modules/typescript/lib/tsserver.js",
     "node /ext/vscode-eslint/server/out/eslintServer.js --stdio",
     "/bin/zsh -c dotnet test",
+    "dotnet run --project src/Api",
+    "dotnet bin/Release/Api.dll",
     "grep vitest",
   ])("light: %s", (cmd) => expect(heavySlotOfProcess(cmd)).toBeNull());
 });

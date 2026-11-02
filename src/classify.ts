@@ -15,14 +15,12 @@ export interface ToolRule {
 export type ToolRules = Record<string, ToolRule>;
 
 export const DEFAULT_TOOL_RULES: ToolRules = {
-  cargo: {
-    slot: "rust",
-    heavy: ["build", "b", "test", "t", "run", "r", "check", "c", "clippy", "bench", "install", "doc"],
-  },
-  go: { slot: "go", heavy: ["build", "test", "run", "install", "vet", "generate"] },
-  swift: { slot: "xcode", heavy: ["build", "test", "run"] },
-  gradle: { slot: "jvm", heavy: ["build", "test", "assemble", "check", "bootRun", "run"] },
-  mvn: { slot: "jvm", heavy: ["compile", "test", "package", "verify", "install", "spring-boot:run"] },
+  // No `run` variants: those start servers that live until stopped (see DOTNET_HEAVY).
+  cargo: { slot: "rust", heavy: ["build", "b", "test", "t", "check", "c", "clippy", "bench", "install", "doc"] },
+  go: { slot: "go", heavy: ["build", "test", "install", "vet", "generate"] },
+  swift: { slot: "xcode", heavy: ["build", "test"] },
+  gradle: { slot: "jvm", heavy: ["build", "test", "assemble", "check"] },
+  mvn: { slot: "jvm", heavy: ["compile", "test", "package", "verify", "install"] },
   docker: { slot: "docker", heavy: ["build", "buildx build", "compose build"] },
 };
 
@@ -43,13 +41,14 @@ function classifyGeneric(rule: ToolRule, args: string[]): string | null {
   return null;
 }
 
+// Builds and tests only. `run`/`watch` and `dotnet app.dll` start servers that live until
+// stopped; gating them would hold a slot for hours (review finding #2). Their memory still
+// counts: the gate reads total memory pressure, whatever is using it.
 const DOTNET_HEAVY = new Set([
   "build",
   "test",
-  "run",
   "publish",
   "pack",
-  "watch",
   "restore",
   "msbuild",
   "clean",
@@ -122,7 +121,7 @@ export function classifyInvocation(tool: string, args: string[], rules: ToolRule
     case "dotnet": {
       const first = args.find((a) => !a.startsWith("-"));
       if (!first) return null;
-      if (DOTNET_HEAVY.has(first) || first.endsWith(".dll")) return "dotnet";
+      if (DOTNET_HEAVY.has(first)) return "dotnet";
       return null;
     }
     case "xcodebuild":
@@ -164,7 +163,9 @@ const WRAPPERS = new Set(["env", "time", "command", "exec", "nice", "sudo"]);
  * Best-effort split of a shell command string into the commands it runs. Not a shell parser:
  * good enough to recognise invocations, never used to execute anything.
  */
-export function commandSegments(command: string): Segment[] {
+const SHELLS = new Set(["sh", "bash", "zsh", "dash"]);
+
+export function commandSegments(command: string, depth = 0): Segment[] {
   const segments: Segment[] = [];
   for (const raw of command.replace(HEREDOC, "<<HEREDOC").split(/&&|\|\||[;|\n]/)) {
     const tokens = raw
@@ -182,6 +183,18 @@ export function commandSegments(command: string): Segment[] {
       i++;
     }
     if (i < tokens.length || env.length) segments.push({ env, argv: tokens.slice(i) });
+    // `bash -c '…'` runs a command line of its own: look inside it too.
+    const argv = tokens.slice(i);
+    const c = argv.indexOf("-c");
+    if (depth < 3 && SHELLS.has(basename(argv[0] ?? "")) && c > 0) {
+      const at = raw.indexOf("-c");
+      const inner = raw
+        .slice(at + 2)
+        .trim()
+        .replace(/^['"]/, "")
+        .replace(/['"]\s*\)?\s*$/, "");
+      segments.push(...commandSegments(inner, depth + 1));
+    }
   }
   return segments;
 }
@@ -202,4 +215,30 @@ export function classifyCommandString(command: string, rules: ToolRules = DEFAUL
     if (slot) slots.add(slot);
   }
   return [...slots];
+}
+
+// Commands that must not be killed halfway and run again: database migrations, publishing,
+// installs that change shared state. Preemption and the memory reaper leave these alone
+// (review #8). Unknown commands (`bouncer run -- ./script.sh`) count as unsafe too.
+const UNSAFE_TO_RESTART: Record<string, string[]> = {
+  dotnet: ["ef", "publish", "pack", "nuget"],
+  pnpm: ["install", "i", "ci", "add", "remove", "publish", "update", "up"],
+  npm: ["install", "i", "ci", "add", "uninstall", "publish", "update"],
+  yarn: ["install", "add", "remove", "publish", "upgrade"],
+  cargo: ["install", "publish"],
+  go: ["install"],
+  mvn: ["install", "deploy"],
+};
+
+export function safeToRestart(tool: string, args: string[], known = true): boolean {
+  if (!known) return false;
+  const pos = positionals(args); // skips flags and their values (--filter web)
+  const first =
+    tool === "pnpm" || tool === "npm" || tool === "yarn"
+      ? JS_SCRIPT_RUNNERS.has(pos[0] ?? "")
+        ? pos[1]
+        : pos[0]
+      : pos[0];
+  if (tool === "yarn" && !pos.length) return false; // bare `yarn` installs
+  return !(UNSAFE_TO_RESTART[tool] ?? []).includes(first ?? "");
 }

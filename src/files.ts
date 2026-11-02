@@ -1,4 +1,14 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 
 // Every file Bouncer edits outside ~/.bouncer belongs to the user: back it up first, write
@@ -18,11 +28,19 @@ export function backup(file: string): void {
   copyFileSync(file, target);
 }
 
+/**
+ * Replace a file's content atomically without changing what the file *is*: a symlink (dotfiles
+ * managed by stow/chezmoi/yadm) stays a symlink and its target is written, and the original
+ * permissions carry over (a 0600 settings file holding tokens must not become 0644).
+ */
 export function writeAtomic(file: string, content: string): void {
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-bouncer`;
-  writeFileSync(tmp, content);
-  renameSync(tmp, file);
+  const target = existsSync(file) ? realpathSync(file) : file;
+  mkdirSync(dirname(target), { recursive: true });
+  const mode = existsSync(target) ? statSync(target).mode & 0o777 : 0o644;
+  const tmp = `${target}.tmp-bouncer`;
+  writeFileSync(tmp, content, { mode });
+  chmodSync(tmp, mode);
+  renameSync(tmp, target);
 }
 
 export function readJson(file: string): Record<string, any> {

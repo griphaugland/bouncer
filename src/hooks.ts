@@ -4,8 +4,11 @@ import { ask } from "./conn";
 import { paths } from "./paths";
 import { safeTools } from "./run";
 
-// The verb only ("prioritize this"), not the noun ("what's the priority here"). Norwegian too.
-const PRIORITIZE = /\b(prioriti[sz]e|prioriter)\b/i;
+// "prioritize this / it / that / these …" (and Norwegian "prioriter dette / det"): an
+// instruction about the current work. A bare verb matched far too much: "prioritize
+// readability", or a pasted review that mentions the word (review #8, and it happened live).
+export const PRIORITIZE =
+  /\b(?:prioriti[sz]e|prioriter)\s+(?:this|it|that|these|this one|this build|this task|my build|my tests?|dette|det|denne)\b/i;
 
 async function readStdin(): Promise<any> {
   try {
@@ -26,10 +29,12 @@ function emit(output: unknown): void {
 // Only actual invocations count (first word of a shell segment, heredoc bodies stripped), so an
 // agent can still write docs or code that merely mention these commands.
 function humanOnly({ env, argv }: Segment): string | null {
-  const bypass = (s: string) => s.startsWith("BOUNCER_BYPASS=");
-  if (env.some(bypass) || (argv[0] === "export" && argv.slice(1).some(bypass))) {
-    return "skipping the Bouncer queue (BOUNCER_BYPASS)";
-  }
+  // Any BOUNCER_* variable: BYPASS and JOB skip the gate, SESSION borrows another session's
+  // priority, HOME points the shim at a socket that doesn't exist (review finding #4).
+  const ours = (s: string) => /^BOUNCER_[A-Z_]+=/.test(s);
+  const exported = ["export", "declare", "typeset"].includes(argv[0] ?? "") ? argv.slice(1) : [];
+  const hit = [...env, ...exported].find(ours);
+  if (hit) return `setting ${hit.split("=")[0]} (it changes how Bouncer queues builds)`;
   const [cmd = "", sub = ""] = argv;
   if (basename(cmd) === "bouncer") {
     if (["prioritize", "cancel", "unschedule", "uninstall"].includes(sub)) return "changing Bouncer's queue or install";

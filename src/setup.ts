@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { type Agent, agents, LEVEL_TEXT } from "./agents";
+import { type Agent, agents, claudeSettingsFiles, LEVEL_TEXT } from "./agents";
 import { readJson, writeJson } from "./files";
 import { hasCmux, type InstallPlan, performInstall } from "./install";
 import { describe, type MachineProfile, MIN_MACOS, macosMajor, recommend, scanMachine, type Tuning } from "./machine";
@@ -254,6 +254,7 @@ export async function runSetup(opts: SetupOptions): Promise<void> {
     const ok = performInstall(plan);
     writeJson(setupFile(), {
       agents: plan.agents,
+      claudeSettings: plan.agents.includes("claude") ? claudeSettingsFiles() : [],
       sessions,
       statusLine: plan.statusLine,
       cmuxDock: plan.cmuxDock,
